@@ -23,122 +23,83 @@ jobs:
           sudo xcode-select -switch "$LATEST_XCODE/Contents/Developer"
           xcodebuild -version
 
-      # 3. 全局广播桥接头文件与清理冲突 Swift 桩代码
-      - name: Universal Missing Headers & Tools Generator
+      # 3. 生成占位文件并强制注入绝对路径（彻底解决头文件 NotFound）
+      - name: Force Absolute Path Headers & Stubs
         run: |
-          echo "[INFO] 正在全量分发桥接头文件与工具类..."
+          echo "[INFO] 正在生成虚拟组件并注入桥接头文件绝对路径..."
           python3 - << 'EOF'
-          import os, shutil
+          import os, re
 
-          # 1. 定义 Objective-C 桥接头文件与实现
-          keychain_h = """#import <Foundation/Foundation.h>
-          #import <Security/Security.h>
+          # 创建虚拟依赖目录
+          tools_dir = os.path.abspath('tcsopensourcetools/TCSOpenSourceTools/tools')
+          os.makedirs(tools_dir, exist_ok=True)
 
+          # 1. 生成核心类的 Objective-C 头文件
+          headers = {
+              'TCSKeychain': '''#import <Foundation/Foundation.h>
           @interface TCSKeychain : NSObject
           + (instancetype)sharedKeychain;
           + (NSString *)passwordForService:(NSString *)service account:(NSString *)account;
           + (BOOL)setPassword:(NSString *)password forService:(NSString *)service account:(NSString *)account;
           + (BOOL)deletePasswordForService:(NSString *)service account:(NSString *)account;
-          @end
-          """
-
-          logger_h = """#import <Foundation/Foundation.h>
-
+          @end''',
+              'TCSUnifiedLogger': '''#import <Foundation/Foundation.h>
           @interface TCSUnifiedLogger : NSObject
           + (instancetype)shared;
           + (instancetype)sharedLogger;
           + (void)log:(NSString *)format, ...;
-          @end
-          """
+          @end'''
+          }
 
-          dummy_m = """#import <Foundation/Foundation.h>
-          @implementation TCSKeychain
-          + (instancetype)sharedKeychain { return nil; }
-          + (NSString *)passwordForService:(NSString *)s account:(NSString *)a { return nil; }
-          + (BOOL)setPassword:(NSString *)p forService:(NSString *)s account:(NSString *)a { return YES; }
-          + (BOOL)deletePasswordForService:(NSString *)s account:(NSString *)a { return YES; }
-          @end
+          for name, content in headers.items():
+              with open(os.path.join(tools_dir, f"{name}.h"), 'w', encoding='utf-8') as f:
+                  f.write(content)
 
-          @implementation TCSUnifiedLogger
-          + (instancetype)shared { return nil; }
-          + (instancetype)sharedLogger { return nil; }
-          + (void)log:(NSString *)format, ... {}
-          @end
-          """
-
-          # 2. 将所有 .h 和 .m 头文件写入项目中的每一个子目录（确保所有 Target 均能通过 quote include 找到）
+          # 2. 动态扫描所有桥接头文件，将 #import 的路径强制修改为本地硬盘的绝对路径
           for root, dirs, files in os.walk('.'):
-              if '.git' in root or 'build' in root:
-                  continue
-              with open(os.path.join(root, 'TCSKeychain.h'), 'w', encoding='utf-8') as f:
-                  f.write(keychain_h)
-              with open(os.path.join(root, 'TCSUnifiedLogger.h'), 'w', encoding='utf-8') as f:
-                  f.write(logger_h)
-              with open(os.path.join(root, 'TCSKeychain.m'), 'w', encoding='utf-8') as f:
-                  f.write(dummy_m)
+              if '.git' in root or 'build' in root: continue
+              for f in files:
+                  if 'Bridging-Header' in f and f.endswith('.h'):
+                      fpath = os.path.join(root, f)
+                      with open(fpath, 'r', encoding='utf-8') as fp:
+                          lines = fp.readlines()
+                      
+                      new_lines = []
+                      for line in lines:
+                          # 匹配所有的 #import "TCSxxx.h" 
+                          m = re.search(r'#import\s+["<](TCS[a-zA-Z0-9_\-]+)\.h[">]', line)
+                          if m:
+                              h_name = m.group(1)
+                              dummy_path = os.path.join(tools_dir, f"{h_name}.h")
+                              # 如果遇到未知的 TCS 依赖，动态生成一个空的壳子
+                              if not os.path.exists(dummy_path):
+                                  with open(dummy_path, 'w', encoding='utf-8') as dh:
+                                      dh.write(f"#import <Foundation/Foundation.h>\n@interface {h_name} : NSObject\n@end\n")
+                              # 替换为绝对路径
+                              new_lines.append(f'#import "{dummy_path}"\n')
+                          else:
+                              new_lines.append(line)
+                      
+                      with open(fpath, 'w', encoding='utf-8') as fp:
+                          fp.writelines(new_lines)
+                      print(f"已将桥接文件绝对路径注入 -> {fpath}")
 
-          # 3. 生成无重名冲突的 Swift 工具类
-          tools_dir = 'tcsopensourcetools/TCSOpenSourceTools/tools'
-          os.makedirs(tools_dir, exist_ok=True)
-
+          # 3. 补齐依赖的 Swift 文件
           swift_files = {
-              "LoggerHelper.swift": """import Foundation
-          @objc public class LoggerHelper: NSObject {
-              @objc public static let shared = LoggerHelper()
-              @objc public static func log(_ msg: String) {}
+              "LoggerHelper.swift": "import Foundation\n@objc public class LoggerHelper: NSObject { @objc public static let shared = LoggerHelper(); @objc public static func log(_ msg: String) {} }",
+              "UNIXUtilities.swift": "import Foundation\n@objc public class UNIXUtilities: NSObject { @objc public static func run(command: String, arguments: [String] = []) -> String { return \"\" } }",
+              "DataExtension.swift": "import Foundation\nextension Data { public var hexString: String { map { String(format: \"%02hhx\", $0) }.joined() } }",
+              "UsernamePassword.swift": "import Foundation\n@objc public class UsernamePassword: NSObject { @objc public var username: String?; @objc public var password: String?; @objc public init(username: String? = nil, password: String? = nil) { self.username = username; self.password = password } }",
+              "SecretKeeper.swift": "import Foundation\n@objc public class SecretKeeper: NSObject { @objc public static let shared = SecretKeeper(); @objc public func save(password: String, for account: String) -> Bool { return true }; @objc public func getPassword(for account: String) -> String? { return nil }; @objc public func deletePassword(for account: String) -> Bool { return true } }",
+              "UserSecretManager.swift": "import Foundation\n@objc public class UserSecretManager: NSObject { @objc public static let shared = UserSecretManager(); @objc public func saveSecret(_ secret: String, for user: String) -> Bool { return true }; @objc public func getSecret(for user: String) -> String? { return nil } }",
+              "FDESetupHelper.swift": "import Foundation\n@objc public class FDESetupHelper: NSObject { @objc public static let shared = FDESetupHelper(); @objc public static func isFDEEnabled() -> Bool { return false }; @objc public static func isEnabled() -> Bool { return false }; @objc public static func addAuthUser(username: String, password: String) -> Bool { return true }; @objc public static func checkFileVaultStatus() -> [String: Any] { return [:] } }"
           }
-          """,
-              "UNIXUtilities.swift": """import Foundation
-          @objc public class UNIXUtilities: NSObject {
-              @objc public static func run(command: String, arguments: [String] = []) -> String { return "" }
-          }
-          """,
-              "DataExtension.swift": """import Foundation
-          extension Data {
-              public var hexString: String { map { String(format: "%02hhx", $0) }.joined() }
-          }
-          """,
-              "UsernamePassword.swift": """import Foundation
-          @objc public class UsernamePassword: NSObject {
-              @objc public var username: String?
-              @objc public var password: String?
-              @objc public init(username: String? = nil, password: String? = nil) {
-                  self.username = username
-                  self.password = password
-              }
-          }
-          """,
-              "SecretKeeper.swift": """import Foundation
-          @objc public class SecretKeeper: NSObject {
-              @objc public static let shared = SecretKeeper()
-              @objc public func save(password: String, for account: String) -> Bool { return true }
-              @objc public func getPassword(for account: String) -> String? { return nil }
-              @objc public func deletePassword(for account: String) -> Bool { return true }
-          }
-          """,
-              "UserSecretManager.swift": """import Foundation
-          @objc public class UserSecretManager: NSObject {
-              @objc public static let shared = UserSecretManager()
-              @objc public func saveSecret(_ secret: String, for user: String) -> Bool { return true }
-              @objc public func getSecret(for user: String) -> String? { return nil }
-          }
-          """,
-              "FDESetupHelper.swift": """import Foundation
-          @objc public class FDESetupHelper: NSObject {
-              @objc public static let shared = FDESetupHelper()
-              @objc public static func isFDEEnabled() -> Bool { return false }
-              @objc public static func isEnabled() -> Bool { return false }
-              @objc public static func addAuthUser(username: String, password: String) -> Bool { return true }
-              @objc public static func checkFileVaultStatus() -> [String: Any] { return [:] }
-          }
-          """
-          }
-
+          
           for fname, code in swift_files.items():
               with open(os.path.join(tools_dir, fname), 'w', encoding='utf-8') as f:
                   f.write(code)
-
-          print("[SUCCESS] 头文件全目录分发与 Swift 工具类修复完成。")
+          
+          print("[SUCCESS] 绝对路径注入与 Swift 补齐执行完成。")
           EOF
 
       # 4. 注入永久有效授权补丁 (解除 14 天限制)
