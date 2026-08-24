@@ -7,11 +7,23 @@ jobs:
   build-and-package:
     runs-on: macos-14
     steps:
-      # 1. 仅克隆主仓库代码（不拉取失效的子模块）
+      # 1. 克隆主仓库代码
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # 2. 注入永久有效授权补丁
+      # 2. 切换至 Xcode 16+ 版本
+      - name: Select Xcode 16+
+        run: |
+          echo "[INFO] 正在检测并切换至最新的 Xcode 16 版本..."
+          LATEST_XCODE=$(find /Applications -maxdepth 1 -name "Xcode_16*.app" | sort -V | tail -n 1)
+          if [ -z "$LATEST_XCODE" ]; then
+            LATEST_XCODE=$(find /Applications -maxdepth 1 -name "Xcode*.app" | sort -V | tail -n 1)
+          fi
+          echo "[INFO] 选定 Xcode: $LATEST_XCODE"
+          sudo xcode-select -switch "$LATEST_XCODE/Contents/Developer"
+          xcodebuild -version
+
+      # 3. 注入永久有效授权补丁
       - name: Apply Unlimited License Patch
         run: |
           python3 - <<EOF
@@ -29,7 +41,7 @@ jobs:
                       print(f"Patched successfully: {path}")
           EOF
 
-      # 3. 编译 Release 版本（Xcode 会自动解析并下载 SPM 依赖）
+      # 4. 编译 Release 版本
       - name: Build XCreds Release
         run: |
           xcodebuild -project XCreds.xcodeproj \
@@ -40,7 +52,7 @@ jobs:
                      CODE_SIGNING_REQUIRED=NO \
                      clean build
 
-      # 4. 提取真实版本并生成 PKG 安装包
+      # 5. 生成 PKG 安装包
       - name: Create Distribution PKG
         run: |
           APP_PATH="./build/Build/Products/Release/XCreds.app"
@@ -54,7 +66,7 @@ jobs:
                    --install-location / \
                    XCreds-Unlimited.pkg
 
-      # 5. 上传安装包到 Artifacts
+      # 6. 上传生成的安装包
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
