@@ -1,16 +1,27 @@
 name: Build OpenSource XCreds
 
 on:
-  workflow_dispatch: # 支持网页手动一键点击触发
+  workflow_dispatch:
 
 jobs:
   build-and-package:
-    runs-on: macos-14 # 使用 GitHub 免费的 Apple Silicon macOS 虚拟机
+    runs-on: macos-14
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
-          submodules: recursive
+          submodules: false # 关闭默认拉取，由下方脚本通过 HTTPS 处理
+
+      - name: Fix Submodules to HTTPS and Sync
+        run: |
+          echo "[INFO] 正在将子模块 SSH 协议重定向为 HTTPS..."
+          # 全局将 SSH 访问强制重定向为公开的 HTTPS 协议
+          git config --global url."https://bitbucket.org/".insteadOf "git@bitbucket.org:"
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          
+          # 同步并拉取所有子模块
+          git submodule sync
+          git submodule update --init --recursive
 
       - name: Apply Unlimited License Patch
         run: |
