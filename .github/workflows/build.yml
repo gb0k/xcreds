@@ -1,0 +1,60 @@
+name: Build OpenSource XCreds
+
+on:
+  workflow_dispatch: # 支持网页手动一键点击触发
+
+jobs:
+  build-and-package:
+    runs-on: macos-14 # 使用 GitHub 免费的 Apple Silicon macOS 虚拟机
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Apply Unlimited License Patch
+        run: |
+          python3 - <<EOF
+          import os, re
+          for root, dirs, files in os.walk('.'):
+              if 'LicenseChecker.swift' in files:
+                  path = os.path.join(root, 'LicenseChecker.swift')
+                  with open(path, 'r', encoding='utf-8') as f:
+                      code = f.read()
+                  pattern = r"(func\s+currentLicenseState\s*\([^)]*\)[^{]*\{)"
+                  if re.search(pattern, code):
+                      code = re.sub(pattern, r"\1\n        return .valid", code, count=1)
+                      with open(path, 'w', encoding='utf-8') as f:
+                          f.write(code)
+                      print(f"Patched successfully: {path}")
+          EOF
+
+      - name: Build XCreds Release
+        run: |
+          xcodebuild -project XCreds.xcodeproj \
+                     -scheme "XCreds" \
+                     -configuration Release \
+                     -derivedDataPath ./build \
+                     CODE_SIGN_IDENTITY="-" \
+                     CODE_SIGNING_REQUIRED=NO \
+                     clean build
+
+      - name: Create Distribution PKG
+        run: |
+          APP_PATH="./build/Build/Products/Release/XCreds.app"
+          APP_VERSION=$(defaults read "$(pwd)/$APP_PATH/Contents/Info.plist" CFBundleShortVersionString 2>/dev/null || echo "5.x")
+          echo "Building PKG for version: $APP_VERSION"
+          mkdir -p pkg_root/Applications
+          cp -R "$APP_PATH" pkg_root/Applications/
+          pkgbuild --root pkg_root \
+                   --identifier com.twocanoes.xcreds \
+                   --version "${APP_VERSION}" \
+                   --install-location / \
+                   XCreds-Unlimited.pkg
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: XCreds-Unlimited-PKG
+          path: XCreds-Unlimited.pkg
+          retention-days: 7
