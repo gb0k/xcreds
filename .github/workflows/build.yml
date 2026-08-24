@@ -23,53 +23,67 @@ jobs:
           sudo xcode-select -switch "$LATEST_XCODE/Contents/Developer"
           xcodebuild -version
 
-      # 3. 规范化补齐缺失的 Swift 与 Objective-C 依赖（带 #pragma once 保护）
-      - name: Generate Clean Stubs & Headers
+      # 3. 全局扫描所有引用，全目录自动铺设防重复头文件与 Swift 桩代码
+      - name: Universal Missing Headers & Tools Generator
         run: |
-          echo "[INFO] 正在规范化补齐所有缺失类与防重复头文件..."
+          echo "[INFO] 正在全目录分发头文件与工具类..."
           python3 - << 'EOF'
-          import os
+          import os, re
 
-          # 1. 定义带防重复包含保护的 Objective-C 头文件
-          keychain_h = """#pragma once
+          # 1. 定义标准 Objective-C 桥接头文件（带 include guard 防重复包含）
+          headers = {
+              'TCSKeychain.h': """#ifndef TCSKeychain_h
+          #define TCSKeychain_h
           #import <Foundation/Foundation.h>
           #import <Security/Security.h>
-
           @interface TCSKeychain : NSObject
           + (instancetype)sharedKeychain;
           + (NSString *)passwordForService:(NSString *)service account:(NSString *)account;
           + (BOOL)setPassword:(NSString *)password forService:(NSString *)service account:(NSString *)account;
           + (BOOL)deletePasswordForService:(NSString *)service account:(NSString *)account;
           @end
-          """
-
-          logger_h = """#pragma once
+          #endif
+          """,
+              'TCSUnifiedLogger.h': """#ifndef TCSUnifiedLogger_h
+          #define TCSUnifiedLogger_h
           #import <Foundation/Foundation.h>
-
           @interface TCSUnifiedLogger : NSObject
           + (instancetype)shared;
           + (instancetype)sharedLogger;
           + (void)log:(NSString *)format, ...;
           @end
+          #endif
           """
+          }
 
-          # 写入主要头文件搜索路径
-          target_dirs = [
-              'tcsopensourcetools/TCSOpenSourceTools/tools',
-              'tcsopensourcetools/TCSOpenSourceTools',
-              'tcsopensourcetools',
-              'XCreds',
-              'XCredsLoginPlugIn'
-          ]
-          for d in target_dirs:
-              os.makedirs(d, exist_ok=True)
-              with open(os.path.join(d, 'TCSKeychain.h'), 'w', encoding='utf-8') as f:
-                  f.write(keychain_h)
-              with open(os.path.join(d, 'TCSUnifiedLogger.h'), 'w', encoding='utf-8') as f:
-                  f.write(logger_h)
+          # 2. 扫描所有文件以发现其他可能遗漏的 TCS 依赖头文件
+          missing_headers = {'TCSKeychain.h', 'TCSUnifiedLogger.h'}
+          for root, dirs, files in os.walk('.'):
+              if '.git' in root or 'build' in root: continue
+              for f in files:
+                  if f.endswith('.h') or f.endswith('.m'):
+                      try:
+                          with open(os.path.join(root, f), 'r', encoding='utf-8', errors='ignore') as fp:
+                              for line in fp:
+                                  m = re.search(r'#import\s+["<](TCS[a-zA-Z0-9_\-]+\.h)[">]', line)
+                                  if m:
+                                      missing_headers.add(m.group(1))
+                      except Exception:
+                          pass
 
-          # 2. 补齐纯净的 Swift 工具类（绝不与已有类产生重名）
+          # 3. 将所有缺失头文件分发至整个工程的所有子目录
+          for root, dirs, files in os.walk('.'):
+              if '.git' in root or 'build' in root: continue
+              for h_name in missing_headers:
+                  content = headers.get(h_name, f"""#ifndef {h_name.replace('.', '_')}\n#define {h_name.replace('.', '_')}\n#import <Foundation/Foundation.h>\n@interface {h_name.replace('.h', '')} : NSObject\n+ (instancetype)shared;\n@end\n#endif\n""")
+                  h_path = os.path.join(root, h_name)
+                  if not os.path.exists(h_path):
+                      with open(h_path, 'w', encoding='utf-8') as f:
+                          f.write(content)
+
+          # 4. 补齐纯净 Swift 辅助工具类
           tools_dir = 'tcsopensourcetools/TCSOpenSourceTools/tools'
+          os.makedirs(tools_dir, exist_ok=True)
           swift_files = {
               "LoggerHelper.swift": """import Foundation
           @objc public class LoggerHelper: NSObject {
@@ -122,12 +136,11 @@ jobs:
           }
           """
           }
-
           for fname, code in swift_files.items():
               with open(os.path.join(tools_dir, fname), 'w', encoding='utf-8') as f:
                   f.write(code)
 
-          print("[SUCCESS] 依赖补全与防重复头文件生成完成。")
+          print("[SUCCESS] 全目录依赖分发完毕。")
           EOF
 
       # 4. 注入永久有效授权补丁 (解除 14 天限制)
@@ -148,7 +161,7 @@ jobs:
                       print(f"Patched successfully: {path}")
           EOF
 
-      # 5. 执行 Release 构建 (全局注入 HEADER_SEARCH_PATHS)
+      # 5. 执行标准 Release 构建
       - name: Build XCreds Release
         run: |
           xcodebuild -project XCreds.xcodeproj \
@@ -157,8 +170,6 @@ jobs:
                      -derivedDataPath ./build \
                      CODE_SIGN_IDENTITY="-" \
                      CODE_SIGNING_REQUIRED=NO \
-                     HEADER_SEARCH_PATHS='$(inherited) $(SRCROOT)/tcsopensourcetools/** $(SRCROOT)/XCreds/**' \
-                     USER_HEADER_SEARCH_PATHS='$(inherited) $(SRCROOT)/tcsopensourcetools/** $(SRCROOT)/XCreds/**' \
                      clean build
 
       # 6. 打包为 PKG 安装包
