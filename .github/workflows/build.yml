@@ -87,8 +87,8 @@ jobs:
           ln -sf Versions/A/ProductLicense "$FRAMEWORK_DIR/ProductLicense"
           ln -sf A "$FRAMEWORK_DIR/Versions/Current"
 
-      # 4. 全局平替 PrefKeys 并在唯一 tools 目录下生成全套工具链 (避免同名源文件冲突)
-      - name: Patch PrefKeys Scope & Generate Unique Toolchain Files
+      # 4. 全局平替 PrefKeys 并生成包含所有高级扩展的工具链
+      - name: Patch PrefKeys Scope & Generate All Advanced Toolchain Files
         run: |
           python3 - << 'EOF'
           import os, re, shutil
@@ -97,7 +97,7 @@ jobs:
           tools_dir = os.path.join(repo_root, 'tcsopensourcetools', 'TCSOpenSourceTools', 'tools')
           os.makedirs(tools_dir, exist_ok=True)
 
-          # 1. 全局平替所有 Swift 文件中的 PrefKeys.<key>.rawValue 为字面量字符串
+          # 1. 全局平替所有 Swift 文件中的 PrefKeys.<key>.rawValue
           for root, dirs, files in os.walk(repo_root):
               if '.git' in root or 'build_output' in root:
                   continue
@@ -123,7 +123,7 @@ jobs:
                   with open(fpath, 'w', encoding='utf-8') as f:
                       f.write(code)
 
-          # 3. 唯一的 Swift 源码（只写入 tools_dir）
+          # 3. 注入全量 Swift 工具类
           swift_files = {
               "LoggerHelper.swift": """import Foundation
           import os
@@ -140,9 +140,15 @@ jobs:
           public func TCSLogWarningWithMark(_ message: String = "", _ args: CVarArg...) { NSLog(message, args) }
 
           public func getConsoleUser() -> String { return NSUserName() }
+
+          @discardableResult
           public func cliTask(_ command: String, arguments: [String] = [], waitForTermination: Bool = true) -> String { return "" }
-          public func cliTask(_ command: String, arguments: [String]) -> String { return "" }
-          public func cliTask(_ command: String) -> String { return "" }
+          @discardableResult
+          public func cliTask(_ command: String, arguments: [String] = [], waitForTermination: Bool = true, completion: ((String) -> Void)? = nil) -> String { completion?(""); return "" }
+          @discardableResult
+          public func cliTask(_ command: String, completion: @escaping (String) -> Void) -> String { completion(""); return "" }
+          @discardableResult
+          public func cliTask(_ command: String, arguments: [String], completion: @escaping (String) -> Void) -> String { completion(""); return "" }
 
           @objc(LoggerHelper)
           @objcMembers
@@ -161,23 +167,7 @@ jobs:
               public static func run(command: String, arguments: [String] = []) -> String { return "" }
               public static func runCommand(_ command: String, args: [String] = []) -> String { return "" }
               public static func cliTask(_ command: String, arguments: [String] = [], waitForTermination: Bool = true) -> String { return "" }
-          }
-          """,
-              "SecretKeeper.swift": """import Foundation
-
-          @objc(SecretKeeper)
-          @objcMembers
-          public class SecretKeeper: NSObject {
-              public static let shared = SecretKeeper()
-              public override init() { super.init() }
-              public init(label: String = "", tag: String = "") throws { super.init() }
-              public init(label: String? = nil, tag: String? = nil, accessGroup: String? = nil) throws { super.init() }
-              public func save(password: String, for account: String) -> Bool { return true }
-              public func getPassword(for account: String) -> String? { return nil }
-              public func deletePassword(for account: String) -> Bool { return true }
-              public static func save(password: String, for account: String) -> Bool { return true }
-              public static func getPassword(for account: String) -> String? { return nil }
-              public static func deletePassword(for account: String) -> Bool { return true }
+              public static func cliTask(_ command: String, completion: ((String) -> Void)? = nil) -> String { completion?(""); return "" }
           }
           """,
               "UsernamePassword.swift": """import Foundation
@@ -204,15 +194,90 @@ jobs:
 
           @objc(LocalAdminCredentials)
           @objcMembers
-          public class LocalAdminCredentials: NSObject {
+          public class LocalAdminCredentials: NSObject, NSSecureCoding {
+              public static var supportsSecureCoding: Bool { return true }
               public var username: String = ""
               public var password: String = ""
+
               public override init() { super.init() }
               public init(username: String? = nil, password: String? = nil) {
                   self.username = username ?? ""
                   self.password = password ?? ""
                   super.init()
               }
+
+              public func hasEmptyValues() -> Bool {
+                  return username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                         password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+              }
+
+              public func encode(with coder: NSCoder) {
+                  coder.encode(username, forKey: "username")
+                  coder.encode(password, forKey: "password")
+              }
+
+              public required init?(coder: NSCoder) {
+                  self.username = coder.decodeObject(of: NSString.self, forKey: "username") as String? ?? ""
+                  self.password = coder.decodeObject(of: NSString.self, forKey: "password") as String? ?? ""
+                  super.init()
+              }
+          }
+          """,
+              "NetworkManager.swift": """import Foundation
+          import AppKit
+
+          @objc public protocol NetworkManagerDelegate: AnyObject {
+              @objc optional func networkDidChange()
+          }
+
+          @objc(NetworkManager)
+          @objcMembers
+          public class NetworkManager: NSObject {
+              @objc public enum WiFiState: Int {
+                  case off = 0
+                  case on = 1
+              }
+
+              public weak var delegate: NetworkManagerDelegate?
+
+              public override init() { super.init() }
+
+              public func identityCommonNames() -> [String] { return [] }
+              public func setWiFiState(_ state: WiFiState, completion: (() -> Void)? = nil) { completion?() }
+              public func scanForNetworks(completion: (([Any]) -> Void)? = nil) { completion?([]) }
+              public func currentSSID() -> String? { return nil }
+          }
+          """,
+              "NSImageExtension.swift": """import Foundation
+          import AppKit
+
+          extension NSImage {
+              @objc public static func imageFromPathOrURL(pathURLString: String) -> NSImage? {
+                  if let url = URL(string: pathURLString), let image = NSImage(contentsOf: url) {
+                      return image
+                  }
+                  if FileManager.default.fileExists(atPath: pathURLString) {
+                      return NSImage(contentsOfFile: pathURLString)
+                  }
+                  return nil
+              }
+          }
+          """,
+              "SecretKeeper.swift": """import Foundation
+
+          @objc(SecretKeeper)
+          @objcMembers
+          public class SecretKeeper: NSObject {
+              public static let shared = SecretKeeper()
+              public override init() { super.init() }
+              public init(label: String = "", tag: String = "") throws { super.init() }
+              public init(label: String? = nil, tag: String? = nil, accessGroup: String? = nil) throws { super.init() }
+              public func save(password: String, for account: String) -> Bool { return true }
+              public func getPassword(for account: String) -> String? { return nil }
+              public func deletePassword(for account: String) -> Bool { return true }
+              public static func save(password: String, for account: String) -> Bool { return true }
+              public static func getPassword(for account: String) -> String? { return nil }
+              public static func deletePassword(for account: String) -> Bool { return true }
           }
           """,
               "UserSecretManager.swift": """import Foundation
@@ -324,6 +389,10 @@ jobs:
           + (id)findItemForService:(NSString *)service account:(NSString *)account;
           + (BOOL)addItem:(id)item forService:(NSString *)service account:(NSString *)account;
           + (BOOL)deleteItemForService:(NSString *)service account:(NSString *)account;
+          + (SecIdentityRef)findIdentityWithSubject:(NSString *)subject;
+          + (SecCertificateRef)findCertificateWithSubject:(NSString *)subject;
+          + (NSArray *)allIdentities;
+          + (NSArray *)identityCommonNames;
           - (NSString *)passwordForService:(NSString *)service account:(NSString *)account;
           - (BOOL)setPassword:(NSString *)password forService:(NSString *)service account:(NSString *)account;
           - (BOOL)deletePasswordForService:(NSString *)service account:(NSString *)account;
@@ -339,6 +408,10 @@ jobs:
           + (id)findItemForService:(NSString *)service account:(NSString *)account { return nil; }
           + (BOOL)addItem:(id)item forService:(NSString *)service account:(NSString *)account { return YES; }
           + (BOOL)deleteItemForService:(NSString *)service account:(NSString *)account { return YES; }
+          + (SecIdentityRef)findIdentityWithSubject:(NSString *)subject { return NULL; }
+          + (SecCertificateRef)findCertificateWithSubject:(NSString *)subject { return NULL; }
+          + (NSArray *)allIdentities { return @[]; }
+          + (NSArray *)identityCommonNames { return @[]; }
           - (NSString *)passwordForService:(NSString *)service account:(NSString *)account { return nil; }
           - (BOOL)setPassword:(NSString *)password forService:(NSString *)service account:(NSString *)account { return YES; }
           - (BOOL)deletePasswordForService:(NSString *)service account:(NSString *)account { return YES; }
@@ -404,7 +477,7 @@ jobs:
                   with open(fpath, 'w', encoding='utf-8') as f:
                       f.write(content)
 
-          # 6. 只分发 .h 头文件至各子目录，绝不复制 .swift / .m
+          # 6. 只分发 .h 头文件，绝不复制 .swift / .m (防止重名编译错误)
           target_subs = [
               'XCreds',
               'tap',
@@ -416,18 +489,18 @@ jobs:
           for sub in target_subs:
               dest_dir = os.path.join(repo_root, sub)
               os.makedirs(dest_dir, exist_ok=True)
-              # 清理可能残留的冲突 Swift 文件
-              for item in ['DataExtension.swift', 'UNIXUtilities.swift', 'UsernamePassword.swift', 'LoggerHelper.swift', 'SecretKeeper.swift', 'UserSecretManager.swift', 'FDESetupHelper.swift']:
+              # 清理历史残留冲突
+              for item in ['DataExtension.swift', 'UNIXUtilities.swift', 'UsernamePassword.swift', 'LoggerHelper.swift', 'SecretKeeper.swift', 'UserSecretManager.swift', 'FDESetupHelper.swift', 'NetworkManager.swift', 'NSImageExtension.swift']:
                   conflict_f = os.path.join(dest_dir, item)
                   if os.path.exists(conflict_f):
                       os.remove(conflict_f)
-              # 只拷贝头文件
+              # 只分发头文件
               for item in os.listdir(tools_dir):
                   if item.endswith('.h'):
                       src_f = os.path.join(tools_dir, item)
                       shutil.copy2(src_f, os.path.join(dest_dir, item))
 
-          print("[SUCCESS] 源码唯一化与头文件分发完成。")
+          print("[SUCCESS] 全套高级工具链部署完成。")
           EOF
 
       # 5. 编译前严格校验物理文件
@@ -437,7 +510,8 @@ jobs:
           echo "[CHECK] 校验目标目录: $TARGET_DIR"
           test -f "$TARGET_DIR/TCSUnifiedLogger.m" || (echo "错误：TCSUnifiedLogger.m 不存在！"; exit 1)
           test -f "$TARGET_DIR/NSFileManager+TCSRealHomeFolder.m" || (echo "错误：NSFileManager+TCSRealHomeFolder.m 不存在！"; exit 1)
-          test -f "$TARGET_DIR/DataExtension.swift" || (echo "错误：DataExtension.swift 不存在！"; exit 1)
+          test -f "$TARGET_DIR/NetworkManager.swift" || (echo "错误：NetworkManager.swift 不存在！"; exit 1)
+          test -f "$TARGET_DIR/NSImageExtension.swift" || (echo "错误：NSImageExtension.swift 不存在！"; exit 1)
           echo "[CHECK] 核心文件物理校验 100% 通过！"
 
       # 6. 注入 Issue #107 永久有效授权补丁
