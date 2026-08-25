@@ -12,12 +12,13 @@ jobs:
   build-and-package:
     runs-on: macos-14
     steps:
-      # 1. 精准克隆指定 Tag (严格双引号包裹包含括号的 Tag)
-      - name: Clone Specific Tag
-        run: |
-          TARGET_TAG="${{ github.event.inputs.target_tag }}"
-          echo "[INFO] 正在克隆目标 Tag: $TARGET_TAG"
-          git clone --branch "$TARGET_TAG" --single-branch https://github.com/twocanoes/xcreds.git repo
+      # 1. 使用 actions/checkout 精准拉取上游仓库的附注 Tag
+      - name: Checkout Specific Upstream Tag
+        uses: actions/checkout@v4
+        with:
+          repository: twocanoes/xcreds
+          ref: ${{ github.event.inputs.target_tag }}
+          path: repo
 
       # 2. 安装构建依赖 (gsed & WhiteBox Packages)
       - name: Install Build Tools
