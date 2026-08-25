@@ -32,11 +32,11 @@ jobs:
           sudo xcode-select -switch "$LATEST_XCODE/Contents/Developer"
           xcodebuild -version
 
-      # 3. 构造 ProductLicense.framework 二进制与原生目录 Mock 依赖
-      - name: Build Mock Framework & Stubs In-Place
+      # 3. 构造 ProductLicense.framework 二进制并补齐全部缺失类（包含 TCSLogWithMark & LocalAdminCredentials）
+      - name: Build Mock Framework & Complete All Stubs
         run: |
           cd repo
-          echo "[INFO] 正在就地构建 ProductLicense.framework 与依赖桩代码..."
+          echo "[INFO] 正在构建 ProductLicense.framework 与补全依赖桩代码..."
 
           # 1. 创建合法的 macOS ProductLicense.framework 二进制与 ModuleMap
           FRAMEWORK_DIR="Carthage/Build/Mac/ProductLicense.framework"
@@ -91,7 +91,7 @@ jobs:
           ln -sf A Versions/Current
           cd ../../../../
 
-          # 2. 统一 TCSLog 定义并就地补齐所有 Swift/ObjC 依赖
+          # 2. 补齐所有 Swift 桩类与全局日志函数
           python3 - << 'EOF'
           import os, re
 
@@ -109,11 +109,20 @@ jobs:
           tools_dir = 'tcsopensourcetools/TCSOpenSourceTools/tools'
           os.makedirs(tools_dir, exist_ok=True)
 
+          # 全面包含 TCSLog 与 TCSLogWithMark
           with open(os.path.join(tools_dir, 'LoggerHelper.swift'), 'w', encoding='utf-8') as f:
               f.write("""import Foundation
           import os
 
           public func TCSLog(_ format: String, _ args: CVarArg...) {
+              NSLog(format, args)
+          }
+
+          public func TCSLogWithMark(_ message: String = "", file: String = #file, function: String = #function, line: Int = #line) {
+              NSLog("%@ [%ld]: %@", function, line, message)
+          }
+
+          public func TCSLogWithMark(_ format: String, _ args: CVarArg...) {
               NSLog(format, args)
           }
 
@@ -130,18 +139,18 @@ jobs:
           """)
 
           swift_stubs = {
-              "UNIXUtilities.swift": """import Foundation
-          @objc(UNIXUtilities)
+              "LocalAdminCredentials.swift": """import Foundation
+          @objc(LocalAdminCredentials)
           @objcMembers
-          public class UNIXUtilities: NSObject {
-              public static func run(command: String, arguments: [String] = []) -> String { return "" }
-              public static func runCommand(_ command: String, args: [String] = []) -> String { return "" }
-          }
-          """,
-              "DataExtension.swift": """import Foundation
-          extension Data {
-              public var hexString: String { map { String(format: "%02hhx", $0) }.joined() }
-              public var string: String? { String(data: self, encoding: .utf8) }
+          public class LocalAdminCredentials: NSObject {
+              public var username: String?
+              public var password: String?
+              public override init() { super.init() }
+              public init(username: String? = nil, password: String? = nil) {
+                  self.username = username
+                  self.password = password
+                  super.init()
+              }
           }
           """,
               "UsernamePassword.swift": """import Foundation
@@ -163,6 +172,20 @@ jobs:
                   self.domain = domain
                   super.init()
               }
+          }
+          """,
+              "UNIXUtilities.swift": """import Foundation
+          @objc(UNIXUtilities)
+          @objcMembers
+          public class UNIXUtilities: NSObject {
+              public static func run(command: String, arguments: [String] = []) -> String { return "" }
+              public static func runCommand(_ command: String, args: [String] = []) -> String { return "" }
+          }
+          """,
+              "DataExtension.swift": """import Foundation
+          extension Data {
+              public var hexString: String { map { String(format: "%02hhx", $0) }.joined() }
+              public var string: String? { String(data: self, encoding: .utf8) }
           }
           """,
               "SecretKeeper.swift": """import Foundation
@@ -268,7 +291,7 @@ jobs:
                   with open(os.path.join(d, h_name), 'w', encoding='utf-8') as f:
                       f.write(code)
 
-          print("[SUCCESS] 依赖补全完成。")
+          print("[SUCCESS] 依赖与符号全部补齐。")
           EOF
 
       # 4. 注入 Issue #107 永久有效授权补丁
@@ -291,7 +314,7 @@ jobs:
                       print(f"[SUCCESS] 补丁注入成功: {path}")
           EOF
 
-      # 5. 执行 Release 编译（移除破坏性的 CLI HEADER/FRAMEWORK 参数）
+      # 5. 执行 Release 编译
       - name: Build XCreds Release
         id: xcodebuild_step
         run: |
@@ -351,7 +374,6 @@ jobs:
           error_lines = []
           for idx, line in enumerate(lines):
               if ': error:' in line or ': fatal error:' in line or 'error: ' in line:
-                  # 抓取错误发生行及其前后 2 行上下文
                   start = max(0, idx - 1)
                   end = min(len(lines), idx + 3)
                   block = "".join(lines[start:end]).strip()
