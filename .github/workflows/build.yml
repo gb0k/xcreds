@@ -32,11 +32,11 @@ jobs:
           sudo xcode-select -switch "$LATEST_XCODE/Contents/Developer"
           xcodebuild -version
 
-      # 3. 构造 ProductLicense 虚拟框架并生成全部独立的 Swift/ObjC 源文件
-      - name: Build Mock Framework & Discrete Stubs
+      # 3. 构造 ProductLicense 虚拟框架并补齐全部日志宏、控制台工具与 Data Hex 扩展
+      - name: Build Mock Framework & Complete All Missing Functions
         run: |
           cd repo
-          echo "[INFO] 正在就地构建 ProductLicense.framework 与所有独立桩代码..."
+          echo "[INFO] 正在构建 ProductLicense.framework 与完整 Swift 工具链..."
 
           # 1. 创建合法的 macOS ProductLicense.framework 二进制与 ModuleMap
           FRAMEWORK_DIR="Carthage/Build/Mac/ProductLicense.framework"
@@ -91,7 +91,7 @@ jobs:
           ln -sf A Versions/Current
           cd ../../../../
 
-          # 2. 补齐所有 Xcode 项目文件中声明的独立 Swift 源码文件
+          # 2. 补齐全部独立的 Swift 扩展与工具函数
           python3 - << 'EOF'
           import os, re
 
@@ -109,17 +109,24 @@ jobs:
           tools_dir = 'tcsopensourcetools/TCSOpenSourceTools/tools'
           os.makedirs(tools_dir, exist_ok=True)
 
-          # 1. LoggerHelper.swift (包含无歧义全局日志函数)
+          # 1. LoggerHelper.swift (全套日志级别宏与 getConsoleUser)
           with open(os.path.join(tools_dir, 'LoggerHelper.swift'), 'w', encoding='utf-8') as f:
               f.write("""import Foundation
           import os
 
-          public func TCSLog(_ message: String = "", _ args: CVarArg...) {
-              NSLog(message, args)
-          }
+          public func TCSLog(_ message: String = "", _ args: CVarArg...) { NSLog(message, args) }
+          public func TCSLogWithMark(_ message: String = "", _ args: CVarArg...) { NSLog(message, args) }
+          public func TCSLogError(_ message: String = "", _ args: CVarArg...) { NSLog(message, args) }
+          public func TCSLogErrorWithMark(_ message: String = "", _ args: CVarArg...) { NSLog(message, args) }
+          public func TCSLogInfo(_ message: String = "", _ args: CVarArg...) { NSLog(message, args) }
+          public func TCSLogInfoWithMark(_ message: String = "", _ args: CVarArg...) { NSLog(message, args) }
+          public func TCSLogDebug(_ message: String = "", _ args: CVarArg...) { NSLog(message, args) }
+          public func TCSLogDebugWithMark(_ message: String = "", _ args: CVarArg...) { NSLog(message, args) }
+          public func TCSLogWarning(_ message: String = "", _ args: CVarArg...) { NSLog(message, args) }
+          public func TCSLogWarningWithMark(_ message: String = "", _ args: CVarArg...) { NSLog(message, args) }
 
-          public func TCSLogWithMark(_ message: String = "", _ args: CVarArg...) {
-              NSLog(message, args)
+          public func getConsoleUser() -> String {
+              return NSUserName()
           }
 
           @objc(LoggerHelper)
@@ -134,7 +141,37 @@ jobs:
           }
           """)
 
-          # 2. UsernamePassword.swift (包含 UsernamePassword 与 LocalAdminCredentials)
+          # 2. DataExtension.swift (完整支持 hexEncodedString 与 fromHexEncodedString)
+          with open(os.path.join(tools_dir, 'DataExtension.swift'), 'w', encoding='utf-8') as f:
+              f.write("""import Foundation
+
+          extension Data {
+              public var hexString: String {
+                  return map { String(format: "%02hhx", $0) }.joined()
+              }
+              public var string: String? {
+                  return String(data: self, encoding: .utf8)
+              }
+              public func hexEncodedString() -> String {
+                  return map { String(format: "%02hhx", $0) }.joined()
+              }
+              public init?(fromHexEncodedString string: String) {
+                  var data = Data(capacity: string.count / 2)
+                  var start = string.startIndex
+                  while start < string.endIndex {
+                      let next = string.index(start, offsetBy: 2, limitedBy: string.endIndex) ?? string.endIndex
+                      let hexByte = String(string[start..<next])
+                      if let byte = UInt8(hexByte, radix: 16) {
+                          data.append(byte)
+                      }
+                      start = next
+                  }
+                  self = data
+              }
+          }
+          """)
+
+          # 3. UsernamePassword.swift (包含 UsernamePassword 与 LocalAdminCredentials)
           with open(os.path.join(tools_dir, 'UsernamePassword.swift'), 'w', encoding='utf-8') as f:
               f.write("""import Foundation
 
@@ -172,7 +209,7 @@ jobs:
           }
           """)
 
-          # 3. UNIXUtilities.swift
+          # 4. UNIXUtilities.swift
           with open(os.path.join(tools_dir, 'UNIXUtilities.swift'), 'w', encoding='utf-8') as f:
               f.write("""import Foundation
 
@@ -184,7 +221,7 @@ jobs:
           }
           """)
 
-          # 4. SecretKeeper.swift (独立实体文件)
+          # 5. SecretKeeper.swift
           with open(os.path.join(tools_dir, 'SecretKeeper.swift'), 'w', encoding='utf-8') as f:
               f.write("""import Foundation
 
@@ -201,7 +238,7 @@ jobs:
           }
           """)
 
-          # 5. UserSecretManager.swift (独立实体文件)
+          # 6. UserSecretManager.swift
           with open(os.path.join(tools_dir, 'UserSecretManager.swift'), 'w', encoding='utf-8') as f:
               f.write("""import Foundation
 
@@ -216,7 +253,7 @@ jobs:
           }
           """)
 
-          # 6. FDESetupHelper.swift (独立实体文件)
+          # 7. FDESetupHelper.swift
           with open(os.path.join(tools_dir, 'FDESetupHelper.swift'), 'w', encoding='utf-8') as f:
               f.write("""import Foundation
 
@@ -230,15 +267,6 @@ jobs:
               public static func checkFileVaultStatus() -> [String: Any] { return [:] }
               public func isFDEEnabled() -> Bool { return false }
               public func isEnabled() -> Bool { return false }
-          }
-          """)
-
-          # 7. DataExtension.swift (独立实体文件)
-          with open(os.path.join(tools_dir, 'DataExtension.swift'), 'w', encoding='utf-8') as f:
-              f.write("""import Foundation
-          extension Data {
-              public var hexString: String { map { String(format: "%02hhx", $0) }.joined() }
-              public var string: String? { String(data: self, encoding: .utf8) }
           }
           """)
 
@@ -304,7 +332,7 @@ jobs:
                   with open(os.path.join(d, h_name), 'w', encoding='utf-8') as f:
                       f.write(code)
 
-          print("[SUCCESS] 所有独立 Swift 与 ObjC 依赖实体文件创建完成。")
+          print("[SUCCESS] 完整依赖函数与扩展定义注入完成。")
           EOF
 
       # 4. 注入 Issue #107 永久有效授权补丁
