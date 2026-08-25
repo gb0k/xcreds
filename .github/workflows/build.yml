@@ -4,31 +4,30 @@ on:
   workflow_dispatch:
     inputs:
       target_tag:
-        description: '要编译的 Git Tag 版本号'
+        description: '要编译的 Git Tag 版本号 (例如 5.9.1)'
         required: true
-        default: '5.9.1' # 默认编译 5.9.1
+        default: '5.9.1'
 
 jobs:
   build-and-package:
     runs-on: macos-14
     steps:
-      # 1. 精准克隆官方指定 Tag 源码
+      # 1. 过滤 ^{} 并精准克隆指定 Tag 源码
       - name: Clone Specific Tag from Upstream
         run: |
           TARGET_TAG="${{ github.event.inputs.target_tag }}"
           echo "[INFO] 用户输入的版本号/Tag: $TARGET_TAG"
           
-          # 查询官方远程仓库中匹配该版本的完整 Tag 名称
-          MATCHED_TAG=$(git ls-remote --tags https://github.com/twocanoes/xcreds.git | grep -i "$TARGET_TAG" | awk -F'/' '{print $3}' | sort -V | tail -n 1)
+          # 使用 --refs 彻底过滤 ^{} 剥离对象，并精准提取标签名称
+          MATCHED_TAG=$(git ls-remote --tags --refs https://github.com/twocanoes/xcreds.git | grep -i "$TARGET_TAG" | sed 's|^.*refs/tags/||' | sort -V | tail -n 1)
           
           if [ -z "$MATCHED_TAG" ]; then
-            echo "[WARN] 未找到完全匹配的 Tag，尝试直接使用输入值: $TARGET_TAG"
+            echo "[WARN] 未通过正则匹配到 Tag，直接使用输入值: $TARGET_TAG"
             MATCHED_TAG="$TARGET_TAG"
           fi
           
-          echo "[INFO] 最终选定检出的 Tag: $MATCHED_TAG"
+          echo "[INFO] 最终选定检出的完整 Tag: $MATCHED_TAG"
           git clone --branch "$MATCHED_TAG" --single-branch https://github.com/twocanoes/xcreds.git repo
-          cd repo
 
       # 2. 安装构建依赖 (gsed & WhiteBox Packages)
       - name: Install Build Tools
