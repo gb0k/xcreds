@@ -9,7 +9,7 @@ on:
         default: 'tag-5.9.1(9158)'
 
 env:
-  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true" # 消除 Node 20 弃用告警
+  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
 
 jobs:
   build-and-package:
@@ -91,7 +91,7 @@ jobs:
           ln -sf A Versions/Current
           cd ../../../../
 
-          # 2. 统一 TCSLog 定义并补齐所有 Swift/ObjC 依赖
+          # 2. 统一 TCSLog 定义并修正 OSLog 类型声明
           python3 - << 'EOF'
           import os, re
 
@@ -109,10 +109,9 @@ jobs:
           tools_dir = 'tcsopensourcetools/TCSOpenSourceTools/tools'
           os.makedirs(tools_dir, exist_ok=True)
 
-          # 全局唯一定义的 LoggerHelper & TCSLog
           with open(os.path.join(tools_dir, 'LoggerHelper.swift'), 'w', encoding='utf-8') as f:
               f.write("""import Foundation
-          import os.log
+          import os
 
           public func TCSLog(_ format: String, _ args: CVarArg...) {
               NSLog(format, args)
@@ -124,8 +123,8 @@ jobs:
               public static let shared = LoggerHelper()
               public static func log(_ msg: String) {}
               public func log(_ msg: String) {}
-              public static var oslog: os.log.OSLog {
-                  return os.log.OSLog(subsystem: "com.twocanoes.xcreds", category: "main")
+              public static var oslog: OSLog {
+                  return OSLog(subsystem: "com.twocanoes.xcreds", category: "main")
               }
           }
           """)
@@ -269,7 +268,7 @@ jobs:
                   with open(os.path.join(d, h_name), 'w', encoding='utf-8') as f:
                       f.write(code)
 
-          print("[SUCCESS] 符号统一与依赖补全完成。")
+          print("[SUCCESS] 依赖补全完成。")
           EOF
 
       # 4. 注入 Issue #107 永久有效授权补丁
@@ -292,11 +291,12 @@ jobs:
                       print(f"[SUCCESS] 补丁注入成功: {path}")
           EOF
 
-      # 5. 执行 Release 编译
+      # 5. 执行 Release 编译并捕获完整日志
       - name: Build XCreds Release
         run: |
           cd repo
           echo "[INFO] 正在执行 Release 编译..."
+          set -o pipefail
           xcodebuild -project XCreds.xcodeproj \
                      -scheme "XCreds" \
                      -configuration Release \
@@ -304,9 +304,9 @@ jobs:
                      CODE_SIGN_IDENTITY="-" \
                      CODE_SIGNING_REQUIRED=NO \
                      CODE_SIGNING_ALLOWED=YES \
-                     FRAMEWORK_SEARCH_PATHS='$(inherited) $(SRCROOT)/Carthage/Build/Mac' \
-                     HEADER_SEARCH_PATHS='$(inherited) $(SRCROOT)/XCreds $(SRCROOT)/tcsopensourcetools/TCSOpenSourceTools/tools' \
-                     clean build
+                     FRAMEWORK_SEARCH_PATHS='$(inherited)$(SRCROOT)/Carthage/Build/Mac' \
+                     HEADER_SEARCH_PATHS='$(inherited) $(SRCROOT)/XCreds$(SRCROOT)/tcsopensourcetools/TCSOpenSourceTools/tools' \
+                     clean build 2>&1 | tee ../xcodebuild.log
 
       # 6. 生成安装包
       - name: Package Distribution PKG
@@ -325,10 +325,64 @@ jobs:
                    --install-location / \
                    ../XCreds-5.9.1-Unlimited.pkg
 
-      # 7. 上传产物
-      - name: Upload Artifact
+      # 7. 成功时上传 PKG
+      - name: Upload Artifact PKG
         uses: actions/upload-artifact@v4
         with:
           name: XCreds-5.9.1-Unlimited-PKG
           path: XCreds-5.9.1-Unlimited.pkg
           retention-days: 7
+
+      # 8. 编译失败时自动提取、高亮并汇总所有具体错误
+      - name: Auto Extract & Highlight Errors
+        if: failure()
+        run: |
+          echo "==================== [ 自动汇总的错误详情 ] ===================="
+          python3 - << 'EOF'
+          import os, re
+
+          log_path = 'xcodebuild.log'
+          if not os.path.exists(log_path):
+              print("未找到日志文件 xcodebuild.log")
+              exit(0)
+
+          with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
+              lines = f.readlines()
+
+          error_blocks = []
+          for i, line in enumerate(lines):
+              if re.search(r'(error:|fatal error:|BUILD FAILED|Command \w+ failed with a nonzero exit code)', line, re.IGNORECASE):
+                  start = max(0, i - 4)
+                  end = min(len(lines), i + 5)
+                  block = "".join(lines[start:end]).strip()
+                  if block not in error_blocks:
+                      error_blocks.append(block)
+
+          summary_text = ""
+          if error_blocks:
+              print(f"检测到 {len(error_blocks)} 处核心错误详情:\n")
+              for idx, err in enumerate(error_blocks[:10], 1):
+                  formatted = f"--- [错误 #{idx}] ---\n{err}\n"
+                  print(formatted)
+                  summary_text += f"```text\n{formatted}\n```\n\n"
+          else:
+              tail_lines = "".join(lines[-30:])
+              print("未正则匹配到标准错误关键词，打印日志末尾 30 行:\n" + tail_lines)
+              summary_text = f"```text\n{tail_lines}\n```"
+
+          # 写入 GitHub Actions 页面摘要
+          summary_file = os.environ.get('GITHUB_STEP_SUMMARY')
+          if summary_file:
+              with open(summary_file, 'a', encoding='utf-8') as sf:
+                  sf.write("### 🚨 Xcode 编译报错汇总\n\n" + summary_text)
+          EOF
+          echo "================================================================"
+
+      # 9. 编译失败时上传完整日志
+      - name: Upload Raw Build Log On Failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Xcode-Raw-Build-Log
+          path: xcodebuild.log
+          retention-days: 3
