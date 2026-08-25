@@ -32,11 +32,11 @@ jobs:
           sudo xcode-select -switch "$LATEST_XCODE/Contents/Developer"
           xcodebuild -version
 
-      # 3. 构造 ProductLicense 虚拟框架并补齐包括 cliTask 在内的全部依赖
+      # 3. 构造 ProductLicense 虚拟框架并补齐包括 SecretKeeper / UserSecretManager / filevaultAuth 在内的完整依赖
       - name: Build Mock Framework & Complete All Stubs
         run: |
           cd repo
-          echo "[INFO] 正在就地构建 ProductLicense.framework 与所有独立桩代码..."
+          echo "[INFO] 正在就地构建 ProductLicense.framework 与所有精准依赖桩代码..."
 
           # 1. 创建合法的 macOS ProductLicense.framework 二进制与 ModuleMap
           FRAMEWORK_DIR="Carthage/Build/Mac/ProductLicense.framework"
@@ -91,7 +91,7 @@ jobs:
           ln -sf A Versions/Current
           cd ../../../../
 
-          # 2. 补齐所有 Xcode 项目文件中声明的独立 Swift 源码文件
+          # 2. 补齐所有独立 Swift 源码与方法
           python3 - << 'EOF'
           import os, re
 
@@ -109,7 +109,7 @@ jobs:
           tools_dir = 'tcsopensourcetools/TCSOpenSourceTools/tools'
           os.makedirs(tools_dir, exist_ok=True)
 
-          # 1. LoggerHelper.swift (包含全套日志级别宏与 getConsoleUser)
+          # 1. LoggerHelper.swift
           with open(os.path.join(tools_dir, 'LoggerHelper.swift'), 'w', encoding='utf-8') as f:
               f.write("""import Foundation
           import os
@@ -141,7 +141,7 @@ jobs:
           }
           """)
 
-          # 2. UNIXUtilities.swift (包含全局 cliTask 与 UNIXUtilities 类)
+          # 2. UNIXUtilities.swift
           with open(os.path.join(tools_dir, 'UNIXUtilities.swift'), 'w', encoding='utf-8') as f:
               f.write("""import Foundation
 
@@ -162,37 +162,71 @@ jobs:
           }
           """)
 
-          # 3. DataExtension.swift (完整支持 hexEncodedString 与 fromHexEncodedString)
-          with open(os.path.join(tools_dir, 'DataExtension.swift'), 'w', encoding='utf-8') as f:
+          # 3. SecretKeeper.swift (支持 throws 构造器与带参初始化)
+          with open(os.path.join(tools_dir, 'SecretKeeper.swift'), 'w', encoding='utf-8') as f:
               f.write("""import Foundation
 
-          extension Data {
-              public var hexString: String {
-                  return map { String(format: "%02hhx", $0) }.joined()
-              }
-              public var string: String? {
-                  return String(data: self, encoding: .utf8)
-              }
-              public func hexEncodedString() -> String {
-                  return map { String(format: "%02hhx", $0) }.joined()
-              }
-              public init?(fromHexEncodedString string: String) {
-                  var data = Data(capacity: string.count / 2)
-                  var start = string.startIndex
-                  while start < string.endIndex {
-                      let next = string.index(start, offsetBy: 2, limitedBy: string.endIndex) ?? string.endIndex
-                      let hexByte = String(string[start..<next])
-                      if let byte = UInt8(hexByte, radix: 16) {
-                          data.append(byte)
-                      }
-                      start = next
-                  }
-                  self = data
-              }
+          @objc(SecretKeeper)
+          @objcMembers
+          public class SecretKeeper: NSObject {
+              public static let shared = SecretKeeper()
+              public override init() { super.init() }
+              public init(label: String = "", tag: String = "") throws { super.init() }
+              public init(label: String? = nil, tag: String? = nil, accessGroup: String? = nil) throws { super.init() }
+              public func save(password: String, for account: String) -> Bool { return true }
+              public func getPassword(for account: String) -> String? { return nil }
+              public func deletePassword(for account: String) -> Bool { return true }
+              public static func save(password: String, for account: String) -> Bool { return true }
+              public static func getPassword(for account: String) -> String? { return nil }
+              public static func deletePassword(for account: String) -> Bool { return true }
           }
           """)
 
-          # 4. UsernamePassword.swift (包含 UsernamePassword 与 LocalAdminCredentials)
+          # 4. UserSecretManager.swift (支持 SecretKeeper 注入构造器)
+          with open(os.path.join(tools_dir, 'UserSecretManager.swift'), 'w', encoding='utf-8') as f:
+              f.write("""import Foundation
+
+          @objc(UserSecretManager)
+          @objcMembers
+          public class UserSecretManager: NSObject {
+              public static let shared = UserSecretManager()
+              public var secretKeeper: SecretKeeper?
+              public override init() { super.init() }
+              public init(secretKeeper: SecretKeeper? = nil) {
+                  self.secretKeeper = secretKeeper
+                  super.init()
+              }
+              public func saveSecret(_ secret: String, for user: String) -> Bool { return true }
+              public func getSecret(for user: String) -> String? { return nil }
+              public static func saveSecret(_ secret: String, for user: String) -> Bool { return true }
+              public static func getSecret(for user: String) -> String? { return nil }
+          }
+          """)
+
+          # 5. FDESetupHelper.swift (包含全局 filevaultAuth 与 FDESetupHelper 类)
+          with open(os.path.join(tools_dir, 'FDESetupHelper.swift'), 'w', encoding='utf-8') as f:
+              f.write("""import Foundation
+
+          public func filevaultAuth(username: String?, password: String?) -> Bool {
+              return true
+          }
+
+          @objc(FDESetupHelper)
+          @objcMembers
+          public class FDESetupHelper: NSObject {
+              public static let shared = FDESetupHelper()
+              public static func isFDEEnabled() -> Bool { return false }
+              public static func isEnabled() -> Bool { return false }
+              public static func addAuthUser(username: String, password: String) -> Bool { return true }
+              public static func checkFileVaultStatus() -> [String: Any] { return [:] }
+              public func isFDEEnabled() -> Bool { return false }
+              public func isEnabled() -> Bool { return false }
+              public func addAuthUser(username: String, password: String) -> Bool { return true }
+              public func filevaultAuth(username: String?, password: String?) -> Bool { return true }
+          }
+          """)
+
+          # 6. UsernamePassword.swift
           with open(os.path.join(tools_dir, 'UsernamePassword.swift'), 'w', encoding='utf-8') as f:
               f.write("""import Foundation
 
@@ -230,52 +264,33 @@ jobs:
           }
           """)
 
-          # 5. SecretKeeper.swift
-          with open(os.path.join(tools_dir, 'SecretKeeper.swift'), 'w', encoding='utf-8') as f:
+          # 7. DataExtension.swift
+          with open(os.path.join(tools_dir, 'DataExtension.swift'), 'w', encoding='utf-8') as f:
               f.write("""import Foundation
 
-          @objc(SecretKeeper)
-          @objcMembers
-          public class SecretKeeper: NSObject {
-              public static let shared = SecretKeeper()
-              public func save(password: String, for account: String) -> Bool { return true }
-              public func getPassword(for account: String) -> String? { return nil }
-              public func deletePassword(for account: String) -> Bool { return true }
-              public static func save(password: String, for account: String) -> Bool { return true }
-              public static func getPassword(for account: String) -> String? { return nil }
-              public static func deletePassword(for account: String) -> Bool { return true }
-          }
-          """)
-
-          # 6. UserSecretManager.swift
-          with open(os.path.join(tools_dir, 'UserSecretManager.swift'), 'w', encoding='utf-8') as f:
-              f.write("""import Foundation
-
-          @objc(UserSecretManager)
-          @objcMembers
-          public class UserSecretManager: NSObject {
-              public static let shared = UserSecretManager()
-              public func saveSecret(_ secret: String, for user: String) -> Bool { return true }
-              public func getSecret(for user: String) -> String? { return nil }
-              public static func saveSecret(_ secret: String, for user: String) -> Bool { return true }
-              public static func getSecret(for user: String) -> String? { return nil }
-          }
-          """)
-
-          # 7. FDESetupHelper.swift
-          with open(os.path.join(tools_dir, 'FDESetupHelper.swift'), 'w', encoding='utf-8') as f:
-              f.write("""import Foundation
-
-          @objc(FDESetupHelper)
-          @objcMembers
-          public class FDESetupHelper: NSObject {
-              public static let shared = FDESetupHelper()
-              public static func isFDEEnabled() -> Bool { return false }
-              public static func isEnabled() -> Bool { return false }
-              public static func addAuthUser(username: String, password: String) -> Bool { return true }
-              public static func checkFileVaultStatus() -> [String: Any] { return [:] }
-              public func isFDEEnabled() -> Bool { return false }
-              public func isEnabled() -> Bool { return false }
+          extension Data {
+              public var hexString: String {
+                  return map { String(format: "%02hhx", $0) }.joined()
+              }
+              public var string: String? {
+                  return String(data: self, encoding: .utf8)
+              }
+              public func hexEncodedString() -> String {
+                  return map { String(format: "%02hhx", $0) }.joined()
+              }
+              public init?(fromHexEncodedString string: String) {
+                  var data = Data(capacity: string.count / 2)
+                  var start = string.startIndex
+                  while start < string.endIndex {
+                      let next = string.index(start, offsetBy: 2, limitedBy: string.endIndex) ?? string.endIndex
+                      let hexByte = String(string[start..<next])
+                      if let byte = UInt8(hexByte, radix: 16) {
+                          data.append(byte)
+                      }
+                      start = next
+                  }
+                  self = data
+              }
           }
           """)
 
@@ -341,7 +356,7 @@ jobs:
                   with open(os.path.join(d, h_name), 'w', encoding='utf-8') as f:
                       f.write(code)
 
-          print("[SUCCESS] 包含 cliTask 的完整独立工具链创建完成。")
+          print("[SUCCESS] 包含 SecretKeeper / UserSecretManager / filevaultAuth 的完整工具链已就绪。")
           EOF
 
       # 4. 注入 Issue #107 永久有效授权补丁
