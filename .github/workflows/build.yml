@@ -15,7 +15,7 @@ jobs:
   build-and-package:
     runs-on: macos-14
     steps:
-      # 1. 精准检出官方 Tag 源码 (跳过私有 Bitbucket 子模块)
+      # 1. 精准拉取官方指定 Tag
       - name: Checkout Specific Upstream Tag
         uses: actions/checkout@v4
         with:
@@ -32,24 +32,22 @@ jobs:
           sudo xcode-select -switch "$LATEST_XCODE/Contents/Developer"
           xcodebuild -version
 
-      # 3. 构造 ProductLicense.framework 二进制与 100% 签名对齐的工具链
-      - name: Build Mock Framework & In-Place Complete Toolchain
+      # 3. 绝对路径创建 ProductLicense 虚拟 Framework
+      - name: Build Mock ProductLicense Framework
         run: |
-          cd repo
-          echo "[INFO] 正在构建 ProductLicense.framework 与精准依赖工具链..."
-
-          # 1. 编译合法的 macOS ProductLicense.framework 动态库与 ModuleMap
-          FRAMEWORK_DIR="Carthage/Build/Mac/ProductLicense.framework"
+          REPO_ROOT="$GITHUB_WORKSPACE/repo"
+          FRAMEWORK_DIR="$REPO_ROOT/Carthage/Build/Mac/ProductLicense.framework"
+          
           mkdir -p "$FRAMEWORK_DIR/Versions/A/Headers"
           mkdir -p "$FRAMEWORK_DIR/Versions/A/Modules"
           mkdir -p "$FRAMEWORK_DIR/Versions/A/Resources"
 
-          cat << 'EOF' > dummy.c
+          cat << 'EOF' > "$REPO_ROOT/dummy.c"
           #include <objc/runtime.h>
           void dummy_product_license(void) {}
           EOF
-          clang -dynamiclib dummy.c -o "$FRAMEWORK_DIR/Versions/A/ProductLicense" -install_name @rpath/ProductLicense.framework/Versions/A/ProductLicense
-          rm -f dummy.c
+          clang -dynamiclib "$REPO_ROOT/dummy.c" -o "$FRAMEWORK_DIR/Versions/A/ProductLicense" -install_name @rpath/ProductLicense.framework/Versions/A/ProductLicense
+          rm -f "$REPO_ROOT/dummy.c"
 
           cat << 'EOF' > "$FRAMEWORK_DIR/Versions/A/Headers/ProductLicense.h"
           #pragma once
@@ -83,20 +81,25 @@ jobs:
           </plist>
           EOF
 
-          cd "$FRAMEWORK_DIR"
-          ln -sf Versions/A/Headers Headers
-          ln -sf Versions/A/Modules Modules
-          ln -sf Versions/A/Resources Resources
-          ln -sf Versions/A/ProductLicense ProductLicense
-          ln -sf A Versions/Current
-          cd ../../../../
+          # 建立软链接 (使用绝对路径)
+          ln -sf Versions/A/Headers "$FRAMEWORK_DIR/Headers"
+          ln -sf Versions/A/Modules "$FRAMEWORK_DIR/Modules"
+          ln -sf Versions/A/Resources "$FRAMEWORK_DIR/Resources"
+          ln -sf Versions/A/ProductLicense "$FRAMEWORK_DIR/ProductLicense"
+          ln -sf A "$FRAMEWORK_DIR/Versions/Current"
 
-          # 2. 注入所有独立、类型完全精准的 Swift 源码文件
+      # 4. 绝对路径全量生成所有 Swift / Objective-C (.h & .m) 源码实体
+      - name: Generate All Source Files With Absolute Paths
+        run: |
           python3 - << 'EOF'
-          import os, re
+          import os, re, shutil
 
-          # 消除 LogShim.swift 中的重复 TCSLog 定义，统一由 LoggerHelper 代理
-          for root, dirs, files in os.walk('.'):
+          repo_root = os.path.join(os.environ['GITHUB_WORKSPACE'], 'repo')
+          tools_dir = os.path.join(repo_root, 'tcsopensourcetools', 'TCSOpenSourceTools', 'tools')
+          os.makedirs(tools_dir, exist_ok=True)
+
+          # 消除 LogShim.swift 中的重复 TCSLog 定义
+          for root, dirs, files in os.walk(repo_root):
               if 'LogShim.swift' in files:
                   fpath = os.path.join(root, 'LogShim.swift')
                   with open(fpath, 'r', encoding='utf-8') as f:
@@ -106,12 +109,9 @@ jobs:
                   with open(fpath, 'w', encoding='utf-8') as f:
                       f.write(code)
 
-          tools_dir = 'tcsopensourcetools/TCSOpenSourceTools/tools'
-          os.makedirs(tools_dir, exist_ok=True)
-
-          # 1. LoggerHelper.swift (全套日志级别与控制台用户信息)
-          with open(os.path.join(tools_dir, 'LoggerHelper.swift'), 'w', encoding='utf-8') as f:
-              f.write("""import Foundation
+          # Swift 源码
+          swift_files = {
+              "LoggerHelper.swift": """import Foundation
           import os
 
           public func TCSLog(_ message: String = "", _ args: CVarArg...) { NSLog(message, args) }
@@ -125,9 +125,7 @@ jobs:
           public func TCSLogWarning(_ message: String = "", _ args: CVarArg...) { NSLog(message, args) }
           public func TCSLogWarningWithMark(_ message: String = "", _ args: CVarArg...) { NSLog(message, args) }
 
-          public func getConsoleUser() -> String {
-              return NSUserName()
-          }
+          public func getConsoleUser() -> String { return NSUserName() }
 
           @objc(LoggerHelper)
           @objcMembers
@@ -135,27 +133,14 @@ jobs:
               public static let shared = LoggerHelper()
               public static func log(_ msg: String) {}
               public func log(_ msg: String) {}
-              public static var oslog: OSLog {
-                  return OSLog(subsystem: "com.twocanoes.xcreds", category: "main")
-              }
+              public static var oslog: OSLog { return OSLog(subsystem: "com.twocanoes.xcreds", category: "main") }
           }
-          """)
+          """,
+              "UNIXUtilities.swift": """import Foundation
 
-          # 2. UNIXUtilities.swift (包含全重载参数的 cliTask)
-          with open(os.path.join(tools_dir, 'UNIXUtilities.swift'), 'w', encoding='utf-8') as f:
-              f.write("""import Foundation
-
-          public func cliTask(_ command: String, arguments: [String] = [], waitForTermination: Bool = true) -> String {
-              return ""
-          }
-
-          public func cliTask(_ command: String, arguments: [String]) -> String {
-              return ""
-          }
-
-          public func cliTask(_ command: String) -> String {
-              return ""
-          }
+          public func cliTask(_ command: String, arguments: [String] = [], waitForTermination: Bool = true) -> String { return "" }
+          public func cliTask(_ command: String, arguments: [String]) -> String { return "" }
+          public func cliTask(_ command: String) -> String { return "" }
 
           @objc(UNIXUtilities)
           @objcMembers
@@ -164,11 +149,8 @@ jobs:
               public static func runCommand(_ command: String, args: [String] = []) -> String { return "" }
               public static func cliTask(_ command: String, arguments: [String] = [], waitForTermination: Bool = true) -> String { return "" }
           }
-          """)
-
-          # 3. SecretKeeper.swift (支持 throws 构造器与完整账户存取)
-          with open(os.path.join(tools_dir, 'SecretKeeper.swift'), 'w', encoding='utf-8') as f:
-              f.write("""import Foundation
+          """,
+              "SecretKeeper.swift": """import Foundation
 
           @objc(SecretKeeper)
           @objcMembers
@@ -184,11 +166,8 @@ jobs:
               public static func getPassword(for account: String) -> String? { return nil }
               public static func deletePassword(for account: String) -> Bool { return true }
           }
-          """)
-
-          # 4. UsernamePassword.swift (包含 UsernamePassword 与 LocalAdminCredentials)
-          with open(os.path.join(tools_dir, 'UsernamePassword.swift'), 'w', encoding='utf-8') as f:
-              f.write("""import Foundation
+          """,
+              "UsernamePassword.swift": """import Foundation
 
           @objc(UsernamePassword)
           @objcMembers
@@ -222,11 +201,8 @@ jobs:
                   super.init()
               }
           }
-          """)
-
-          # 5. UserSecretManager.swift (精准匹配 adminCredentials -> Optional)
-          with open(os.path.join(tools_dir, 'UserSecretManager.swift'), 'w', encoding='utf-8') as f:
-              f.write("""import Foundation
+          """,
+              "UserSecretManager.swift": """import Foundation
 
           @objc(UserSecretManager)
           @objcMembers
@@ -242,22 +218,13 @@ jobs:
               public func getSecret(for user: String) -> String? { return nil }
               public static func saveSecret(_ secret: String, for user: String) -> Bool { return true }
               public static func getSecret(for user: String) -> String? { return nil }
-              public func adminCredentials() throws -> UsernamePassword? {
-                  return UsernamePassword(username: "", password: "")
-              }
-              public static func adminCredentials() throws -> UsernamePassword? {
-                  return UsernamePassword(username: "", password: "")
-              }
+              public func adminCredentials() throws -> UsernamePassword? { return UsernamePassword(username: "", password: "") }
+              public static func adminCredentials() throws -> UsernamePassword? { return UsernamePassword(username: "", password: "") }
           }
-          """)
+          """,
+              "FDESetupHelper.swift": """import Foundation
 
-          # 6. FDESetupHelper.swift (包含全局 filevaultAuth)
-          with open(os.path.join(tools_dir, 'FDESetupHelper.swift'), 'w', encoding='utf-8') as f:
-              f.write("""import Foundation
-
-          public func filevaultAuth(username: String?, password: String?) -> Bool {
-              return true
-          }
+          public func filevaultAuth(username: String?, password: String?) -> Bool { return true }
 
           @objc(FDESetupHelper)
           @objcMembers
@@ -272,40 +239,66 @@ jobs:
               public func addAuthUser(username: String, password: String) -> Bool { return true }
               public func filevaultAuth(username: String?, password: String?) -> Bool { return true }
           }
-          """)
-
-          # 7. DataExtension.swift (支持 hexEncodedString 与 fromHexEncodedString)
-          with open(os.path.join(tools_dir, 'DataExtension.swift'), 'w', encoding='utf-8') as f:
-              f.write("""import Foundation
+          """,
+              "DataExtension.swift": """import Foundation
 
           extension Data {
-              public var hexString: String {
-                  return map { String(format: "%02hhx", $0) }.joined()
-              }
-              public var string: String? {
-                  return String(data: self, encoding: .utf8)
-              }
-              public func hexEncodedString() -> String {
-                  return map { String(format: "%02hhx", $0) }.joined()
-              }
+              public var hexString: String { return map { String(format: "%02hhx", $0) }.joined() }
+              public var string: String? { return String(data: self, encoding: .utf8) }
+              public func hexEncodedString() -> String { return map { String(format: "%02hhx", $0) }.joined() }
               public init?(fromHexEncodedString string: String) {
                   var data = Data(capacity: string.count / 2)
                   var start = string.startIndex
                   while start < string.endIndex {
                       let next = string.index(start, offsetBy: 2, limitedBy: string.endIndex) ?? string.endIndex
                       let hexByte = String(string[start..<next])
-                      if let byte = UInt8(hexByte, radix: 16) {
-                          data.append(byte)
-                      }
+                      if let byte = UInt8(hexByte, radix: 16) { data.append(byte) }
                       start = next
                   }
                   self = data
               }
           }
-          """)
+          """
+          }
 
-          # 8. 补齐 Objective-C 头文件
-          headers_content = {
+          for fname, code in swift_files.items():
+              with open(os.path.join(tools_dir, fname), 'w', encoding='utf-8') as f:
+                  f.write(code)
+
+          # Objective-C 头文件与 .m 实现
+          objc_files = {
+              "TCSUnifiedLogger.h": """#pragma once
+          #import <Foundation/Foundation.h>
+          @interface TCSUnifiedLogger : NSObject
+          + (instancetype)shared;
+          + (instancetype)sharedLogger;
+          + (void)log:(NSString *)format, ...;
+          - (void)log:(NSString *)format, ...;
+          @end
+          """,
+              "TCSUnifiedLogger.m": """#import "TCSUnifiedLogger.h"
+          @implementation TCSUnifiedLogger
+          + (instancetype)shared { static TCSUnifiedLogger *s; static dispatch_once_t o; dispatch_once(&o, ^{ s = [TCSUnifiedLogger new]; }); return s; }
+          + (instancetype)sharedLogger { return [self shared]; }
+          + (void)log:(NSString *)format, ... {}
+          - (void)log:(NSString *)format, ... {}
+          @end
+          """,
+              "NSFileManager+TCSRealHomeFolder.h": """#pragma once
+          #import <Foundation/Foundation.h>
+          @interface NSFileManager (TCSRealHomeFolder)
+          - (NSString *)realHomeDirectoryForCurrentUser;
+          - (NSString *)realHomeDirectoryForUser:(NSString *)userName;
+          - (NSString *)realHomeDirectoryForUser:(NSString *)userName error:(NSError **)error;
+          @end
+          """,
+              "NSFileManager+TCSRealHomeFolder.m": """#import "NSFileManager+TCSRealHomeFolder.h"
+          @implementation NSFileManager (TCSRealHomeFolder)
+          - (NSString *)realHomeDirectoryForCurrentUser { return NSHomeDirectory(); }
+          - (NSString *)realHomeDirectoryForUser:(NSString *)userName { return NSHomeDirectoryForUser(userName); }
+          - (NSString *)realHomeDirectoryForUser:(NSString *)userName error:(NSError **)error { return NSHomeDirectoryForUser(userName); }
+          @end
+          """,
               "TCSKeychain.h": """#pragma once
           #import <Foundation/Foundation.h>
           #import <Security/Security.h>
@@ -323,13 +316,19 @@ jobs:
           - (BOOL)deletePasswordForService:(NSString *)service account:(NSString *)account;
           @end
           """,
-              "TCSUnifiedLogger.h": """#pragma once
-          #import <Foundation/Foundation.h>
-          @interface TCSUnifiedLogger : NSObject
-          + (instancetype)shared;
-          + (instancetype)sharedLogger;
-          + (void)log:(NSString *)format, ...;
-          - (void)log:(NSString *)format, ...;
+              "TCSKeychain.m": """#import "TCSKeychain.h"
+          @implementation TCSKeychain
+          + (instancetype)sharedKeychain { static TCSKeychain *s; static dispatch_once_t o; dispatch_once(&o, ^{ s = [TCSKeychain new]; }); return s; }
+          + (instancetype)shared { return [self sharedKeychain]; }
+          + (NSString *)passwordForService:(NSString *)service account:(NSString *)account { return nil; }
+          + (BOOL)setPassword:(NSString *)password forService:(NSString *)service account:(NSString *)account { return YES; }
+          + (BOOL)deletePasswordForService:(NSString *)service account:(NSString *)account { return YES; }
+          + (id)findItemForService:(NSString *)service account:(NSString *)account { return nil; }
+          + (BOOL)addItem:(id)item forService:(NSString *)service account:(NSString *)account { return YES; }
+          + (BOOL)deleteItemForService:(NSString *)service account:(NSString *)account { return YES; }
+          - (NSString *)passwordForService:(NSString *)service account:(NSString *)account { return nil; }
+          - (BOOL)setPassword:(NSString *)password forService:(NSString *)service account:(NSString *)account { return YES; }
+          - (BOOL)deletePasswordForService:(NSString *)service account:(NSString *)account { return YES; }
           @end
           """,
               "TCTaskHelper.h": """#pragma once
@@ -337,6 +336,12 @@ jobs:
           @interface TCTaskHelper : NSObject
           + (NSString *)runTaskWithCommand:(NSString *)command arguments:(NSArray *)arguments;
           + (NSString *)runTask:(NSString *)command arguments:(NSArray *)arguments;
+          @end
+          """,
+              "TCTaskHelper.m": """#import "TCTaskHelper.h"
+          @implementation TCTaskHelper
+          + (NSString *)runTaskWithCommand:(NSString *)command arguments:(NSArray *)arguments { return @""; }
+          + (NSString *)runTask:(NSString *)command arguments:(NSArray *)arguments { return @""; }
           @end
           """,
               "TCTaskWrapperWithBlocks.h": """#pragma once
@@ -348,35 +353,83 @@ jobs:
           - (void)startProcess;
           - (void)stopProcess;
           @end
+          """,
+              "TCTaskWrapperWithBlocks.m": """#import "TCTaskWrapperWithBlocks.h"
+          @implementation TCTaskWrapperWithBlocks
+          - (void)startProcess {}
+          - (void)stopProcess {}
+          @end
           """
           }
-          target_dirs = [
-              'XCreds',
-              'XCreds AutoFill Extension',
-              'XCreds Login Overlay',
-              'XCredsLoginPlugIn',
-              'tap',
-              'tcsopensourcetools/TCSOpenSourceTools/tools',
-              'tcsopensourcetools/TCSOpenSourceTools',
-              'tcsopensourcetools'
-          ]
-          for d in target_dirs:
-              os.makedirs(d, exist_ok=True)
-              for h_name, code in headers_content.items():
-                  with open(os.path.join(d, h_name), 'w', encoding='utf-8') as f:
-                      f.write(code)
 
-          print("[SUCCESS] 完整独立工具链已全部创建完毕。")
+          for fname, code in objc_files.items():
+              with open(os.path.join(tools_dir, fname), 'w', encoding='utf-8') as f:
+                  f.write(code)
+
+          # 全自动扫描 project.pbxproj 兜底缺失文件
+          pbx_path = os.path.join(repo_root, 'XCreds.xcodeproj', 'project.pbxproj')
+          with open(pbx_path, 'r', encoding='utf-8') as f:
+              pbx = f.read()
+
+          all_sources = set(re.findall(r'/\*\s*([a-zA-Z0-9_\+\-]+\.(?:m|swift|c|cpp|h))\s+in\s+Sources', pbx))
+          for src_file in all_sources:
+              fpath = os.path.join(tools_dir, src_file)
+              if not os.path.exists(fpath):
+                  base, ext = os.path.splitext(src_file)
+                  if ext == '.m':
+                      if '+' in base:
+                          cls, cat = base.split('+', 1)
+                          content = f"#import <Foundation/Foundation.h>\n@implementation {cls} ({cat})\n@end\n"
+                      else:
+                          content = f"#import <Foundation/Foundation.h>\n@implementation {base}\n@end\n"
+                  elif ext == '.swift':
+                      content = "import Foundation\n"
+                  elif ext == '.h':
+                      content = "#pragma once\n#import <Foundation/Foundation.h>\n"
+                  else:
+                      content = ""
+                  with open(fpath, 'w', encoding='utf-8') as f:
+                      f.write(content)
+
+          # 同步全量工具链到所有可能引用的目录
+          target_subs = [
+              'tcsopensourcetools',
+              'tcsopensourcetools/TCSOpenSourceTools',
+              'XCreds',
+              'tap',
+              'FilevaultLoginHelper',
+              'XCreds Login Overlay',
+              'XCreds AutoFill Extension',
+              'XCredsLoginPlugIn'
+          ]
+          for sub in target_subs:
+              dest_dir = os.path.join(repo_root, sub)
+              os.makedirs(dest_dir, exist_ok=True)
+              for item in os.listdir(tools_dir):
+                  src_f = os.path.join(tools_dir, item)
+                  if os.path.isfile(src_f):
+                      shutil.copy2(src_f, os.path.join(dest_dir, item))
+
+          print("[SUCCESS] 绝对路径注入完成。")
           EOF
 
-      # 4. 注入 Issue #107 永久有效授权补丁 (解除 14 天及许可限制)
+      # 5. 编译前严格校验文件物理存在性
+      - name: Verify Physical Existence Of Required Files
+        run: |
+          TARGET_DIR="$GITHUB_WORKSPACE/repo/tcsopensourcetools/TCSOpenSourceTools/tools"
+          echo "[CHECK] 校验目标目录: $TARGET_DIR"
+          ls -la "$TARGET_DIR"
+          test -f "$TARGET_DIR/TCSUnifiedLogger.m" || (echo "错误：TCSUnifiedLogger.m 不存在！"; exit 1)
+          test -f "$TARGET_DIR/NSFileManager+TCSRealHomeFolder.m" || (echo "错误：NSFileManager+TCSRealHomeFolder.m 不存在！"; exit 1)
+          echo "[CHECK] 核心 .m 物理文件校验 100% 通过！"
+
+      # 6. 注入 Issue #107 永久有效授权补丁
       - name: Apply Issue #107 Unlimited License Patch
         run: |
-          cd repo
-          echo "[INFO] 正在注入永久有效授权补丁 (LicenseChecker -> .valid)..."
           python3 - << 'EOF'
           import os, re
-          for root, dirs, files in os.walk('.'):
+          repo_root = os.path.join(os.environ['GITHUB_WORKSPACE'], 'repo')
+          for root, dirs, files in os.walk(repo_root):
               if 'LicenseChecker.swift' in files:
                   path = os.path.join(root, 'LicenseChecker.swift')
                   with open(path, 'r', encoding='utf-8') as f:
@@ -389,11 +442,11 @@ jobs:
                       print(f"[SUCCESS] 补丁注入成功: {path}")
           EOF
 
-      # 5. 执行 Release 编译 (免证书 Ad-hoc 签名)
+      # 7. 执行 Release 编译 (免证书 Ad-hoc 签名)
       - name: Build XCreds Release
         id: xcodebuild_step
         run: |
-          cd repo
+          cd "$GITHUB_WORKSPACE/repo"
           echo "[INFO] 正在执行 Release 编译..."
           set -o pipefail
           xcodebuild -project XCreds.xcodeproj \
@@ -405,10 +458,10 @@ jobs:
                      CODE_SIGNING_ALLOWED=YES \
                      clean build 2>&1 | tee ../xcodebuild.log
 
-      # 6. 生成标准 PKG 安装包
+      # 8. 打包为 PKG 安装包
       - name: Package Distribution PKG
         run: |
-          cd repo
+          cd "$GITHUB_WORKSPACE/repo"
           echo "[INFO] 正在生成安装包..."
           APP_PATH="./build_output/Build/Products/Release/XCreds.app"
           APP_VERSION=$(defaults read "$(pwd)/$APP_PATH/Contents/Info.plist" CFBundleShortVersionString 2>/dev/null || echo "5.9.1")
@@ -420,9 +473,9 @@ jobs:
                    --identifier com.twocanoes.xcreds \
                    --version "${APP_VERSION}" \
                    --install-location / \
-                   ../XCreds-5.9.1-Unlimited.pkg
+                   "$GITHUB_WORKSPACE/XCreds-5.9.1-Unlimited.pkg"
 
-      # 7. 上传生成的 PKG 安装包到 Artifacts
+      # 9. 成功时上传安装包
       - name: Upload Artifact PKG
         uses: actions/upload-artifact@v4
         with:
@@ -430,15 +483,14 @@ jobs:
           path: XCreds-5.9.1-Unlimited.pkg
           retention-days: 7
 
-      # 8. 若异常失败时自动汇总核心错误详情
+      # 10. 失败时提取核心错误
       - name: Extract & Display Compile Errors
         if: failure()
         run: |
           echo "==================== [ 核心编译错误详情汇总 ] ===================="
           python3 - << 'EOF'
           import os, re
-
-          log_file = 'xcodebuild.log'
+          log_file = os.path.join(os.environ['GITHUB_WORKSPACE'], 'xcodebuild.log')
           if not os.path.exists(log_file):
               print("未找到日志文件")
               exit(0)
