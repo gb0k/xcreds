@@ -8,11 +8,14 @@ on:
         required: true
         default: 'tag-5.9.1(9158)'
 
+env:
+  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true" # 消除 Node 20 弃用告警
+
 jobs:
   build-and-package:
     runs-on: macos-14
     steps:
-      # 1. 干净拉取官方指定 Tag 源码
+      # 1. 检出指定 Tag 源码
       - name: Checkout Specific Upstream Tag
         uses: actions/checkout@v4
         with:
@@ -29,13 +32,13 @@ jobs:
           sudo xcode-select -switch "$LATEST_XCODE/Contents/Developer"
           xcodebuild -version
 
-      # 3. 构造 ProductLicense.framework 二进制、分靶向 Swift 桩代码与 Mock 头文件
-      - name: Build Mock Framework, Isolated Stubs & Headers
+      # 3. 构造 ProductLicense.framework、统一全局 TCSLog 与补齐依赖
+      - name: Build Mock Framework & Unify TCSLog
         run: |
           cd repo
-          echo "[INFO] 正在构建 ProductLicense.framework 与精准依赖..."
+          echo "[INFO] 正在构建 ProductLicense.framework 并统一全局日志符号..."
 
-          # 1. 编译合法的 macOS ProductLicense.framework 二进制与 ModuleMap
+          # 1. 创建合法的 macOS ProductLicense.framework 二进制与 ModuleMap
           FRAMEWORK_DIR="Carthage/Build/Mac/ProductLicense.framework"
           mkdir -p "$FRAMEWORK_DIR/Versions/A/Headers"
           mkdir -p "$FRAMEWORK_DIR/Versions/A/Modules"
@@ -88,17 +91,32 @@ jobs:
           ln -sf A Versions/Current
           cd ../../../../
 
-          # 2. 生成无冲突的 Swift 桩代码，并解决 xcredstap 的 TCSLog 隔离定义
+          # 2. 统一 TCSLog 定义并补齐所有 Swift/ObjC 依赖
           python3 - << 'EOF'
-          import os
+          import os, re
+
+          # 消除 LogShim.swift 中的重复 TCSLog 定义，统一由 LoggerHelper 提供
+          for root, dirs, files in os.walk('.'):
+              if 'LogShim.swift' in files:
+                  fpath = os.path.join(root, 'LogShim.swift')
+                  with open(fpath, 'r', encoding='utf-8') as f:
+                      code = f.read()
+                  code = re.sub(r'public\s+func\s+TCSLog[^{]*\{[^}]*\}', '// Replaced by unified LoggerHelper.TCSLog', code)
+                  code = re.sub(r'func\s+TCSLog[^{]*\{[^}]*\}', '// Replaced by unified LoggerHelper.TCSLog', code)
+                  with open(fpath, 'w', encoding='utf-8') as f:
+                      f.write(code)
 
           tools_dir = 'tcsopensourcetools/TCSOpenSourceTools/tools'
           os.makedirs(tools_dir, exist_ok=True)
 
-          # 纯净 LoggerHelper（不带全局 TCSLog，避免与 LogShim.swift 重名冲突）
+          # 全局唯一定义的 LoggerHelper & TCSLog
           with open(os.path.join(tools_dir, 'LoggerHelper.swift'), 'w', encoding='utf-8') as f:
               f.write("""import Foundation
           import os.log
+
+          public func TCSLog(_ format: String, _ args: CVarArg...) {
+              NSLog(format, args)
+          }
 
           @objc(LoggerHelper)
           @objcMembers
@@ -112,17 +130,6 @@ jobs:
           }
           """)
 
-          # 为缺少 LogShim 的 tap 模块单独注入私有 TCSLog
-          tap_driver = 'tap/TokenDriver.swift'
-          if os.path.exists(tap_driver):
-              with open(tap_driver, 'r', encoding='utf-8') as f:
-                  code = f.read()
-              if 'func TCSLog(' not in code:
-                  with open(tap_driver, 'a', encoding='utf-8') as f:
-                      f.write("\n\nfileprivate func TCSLog(_ format: String, _ args: CVarArg...) {\n    NSLog(format, args)\n}\n")
-                  print("[SUCCESS] 已为 tap 模块注入隔离日志声明。")
-
-          # 补齐其他辅助工具类
           swift_stubs = {
               "UNIXUtilities.swift": """import Foundation
           @objc(UNIXUtilities)
@@ -201,7 +208,6 @@ jobs:
               with open(os.path.join(tools_dir, s_name), 'w', encoding='utf-8') as f:
                   f.write(code)
 
-          # 3. 补齐 Objective-C 头文件
           headers_content = {
               "TCSKeychain.h": """#pragma once
           #import <Foundation/Foundation.h>
@@ -263,10 +269,10 @@ jobs:
                   with open(os.path.join(d, h_name), 'w', encoding='utf-8') as f:
                       f.write(code)
 
-          print("[SUCCESS] 依赖补齐与隔离处理完毕。")
+          print("[SUCCESS] 符号统一与依赖补全完成。")
           EOF
 
-      # 4. 注入 Issue #107 补丁 (解除时间与授权限制)
+      # 4. 注入 Issue #107 永久有效授权补丁
       - name: Apply Issue #107 Unlimited License Patch
         run: |
           cd repo
@@ -302,7 +308,7 @@ jobs:
                      HEADER_SEARCH_PATHS='$(inherited) $(SRCROOT)/XCreds $(SRCROOT)/tcsopensourcetools/TCSOpenSourceTools/tools' \
                      clean build
 
-      # 6. 生成 PKG 安装包
+      # 6. 生成安装包
       - name: Package Distribution PKG
         run: |
           cd repo
@@ -319,7 +325,7 @@ jobs:
                    --install-location / \
                    ../XCreds-5.9.1-Unlimited.pkg
 
-      # 7. 上传安装包供下载
+      # 7. 上传产物
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
