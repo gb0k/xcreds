@@ -2,55 +2,80 @@ name: Build OpenSource XCreds
 
 on:
   workflow_dispatch:
+    inputs:
+      target_tag:
+        description: '要编译的 Git Tag 版本号'
+        required: true
+        default: '5.9.1' # 默认编译 5.9.1
 
 jobs:
   build-and-package:
     runs-on: macos-14
     steps:
-      # 1. 克隆主分支代码
-      - name: Checkout Code
-        uses: actions/checkout@v4
+      # 1. 精准克隆官方指定 Tag 源码
+      - name: Clone Specific Tag from Upstream
+        run: |
+          TARGET_TAG="${{ github.event.inputs.target_tag }}"
+          echo "[INFO] 用户输入的版本号/Tag: $TARGET_TAG"
+          
+          # 查询官方远程仓库中匹配该版本的完整 Tag 名称
+          MATCHED_TAG=$(git ls-remote --tags https://github.com/twocanoes/xcreds.git | grep -i "$TARGET_TAG" | awk -F'/' '{print $3}' | sort -V | tail -n 1)
+          
+          if [ -z "$MATCHED_TAG" ]; then
+            echo "[WARN] 未找到完全匹配的 Tag，尝试直接使用输入值: $TARGET_TAG"
+            MATCHED_TAG="$TARGET_TAG"
+          fi
+          
+          echo "[INFO] 最终选定检出的 Tag: $MATCHED_TAG"
+          git clone --branch "$MATCHED_TAG" --single-branch https://github.com/twocanoes/xcreds.git repo
+          cd repo
 
-      # 2. 切换至 Xcode 16+ 编译环境
+      # 2. 安装构建依赖 (gsed & WhiteBox Packages)
+      - name: Install Build Tools
+        run: |
+          echo "[INFO] 正在安装 Packages 打包工具与 GNU sed..."
+          brew install gsed
+          brew install --cask packages
+
+      # 3. 切换 Xcode 16+ 编译器
       - name: Select Xcode 16+
         run: |
-          echo "[INFO] 正在定位 Xcode 16+..."
           LATEST_XCODE=$(find /Applications -maxdepth 1 -name "Xcode_16*.app" | sort -V | tail -n 1)
-          if [ -z "$LATEST_XCODE" ]; then
-            LATEST_XCODE=$(find /Applications -maxdepth 1 -name "Xcode*.app" | sort -V | tail -n 1)
-          fi
-          echo "[INFO] 选定编译器: $LATEST_XCODE"
+          [ -z "$LATEST_XCODE" ] && LATEST_XCODE=$(find /Applications -maxdepth 1 -name "Xcode*.app" | sort -V | tail -n 1)
+          echo "[INFO] 选定 Xcode: $LATEST_XCODE"
           sudo xcode-select -switch "$LATEST_XCODE/Contents/Developer"
           xcodebuild -version
 
-      # 3. 补齐 ProductLicense 虚拟 Framework、缺失头文件与 Swift 桩代码
-      - name: Generate ProductLicense Stub & Tools
+      # 4. 全局替换 Bundle ID 与清理官方 Team ID
+      - name: Replace Bundle ID & Team ID
         run: |
-          echo "[INFO] 正在生成 ProductLicense 虚拟框架与桥接依赖..."
+          cd repo
+          echo "[INFO] 正在全局替换 Bundle ID 与 Team ID..."
+          export BUNDLE_ID_PREFIX='com.opensource'
+
+          # 替换文本内容中的官方标识符
+          grep -RlI 'com\.twocanoes' . | grep -v '.git' | sed -e 's_\(.*\)_"\1"_g' | xargs gsed -i "s/com\.twocanoes/$BUNDLE_ID_PREFIX/g"
+          grep -RlI 'UXP6YEHSPW' . | grep -v '.git' | sed -e 's_\(.*\)_"\1"_g' | xargs gsed -i "s/UXP6YEHSPW//g"
+
+          # 物理重命名带 Bundle ID 的文件名
+          find . -iname '*com.twocanoes*' -not -path '*/.*' -exec bash -c 'old="{}"; new=$(echo "$old" | sed "s/com\.twocanoes/com.opensource/"); mv "$old" "$new"' \;
+
+      # 5. 动态补全缺失文件与清理桥接头文件
+      - name: Clean Bridging Headers & Stubs
+        run: |
+          cd repo
+          echo "[INFO] 正在补全工具类依赖..."
           python3 - << 'EOF'
           import os, re
 
-          # 1. 自动生成 ProductLicense.framework 占位
-          carthage_pl = 'Carthage/Build/Mac/ProductLicense.framework/Headers'
-          os.makedirs(carthage_pl, exist_ok=True)
-          pl_header = """#ifndef ProductLicense_h
-          #define ProductLicense_h
-          #import <Foundation/Foundation.h>
-          @interface ProductLicense : NSObject
-          + (instancetype)shared;
-          @end
-          #endif
-          """
-          with open(os.path.join(carthage_pl, 'ProductLicense.h'), 'w', encoding='utf-8') as f:
-              f.write(pl_header)
-
-          # 2. 补齐 Swift 辅助工具类
           tools_dir = 'tcsopensourcetools/TCSOpenSourceTools/tools'
           os.makedirs(tools_dir, exist_ok=True)
+
+          # 补齐 Swift 缺失工具类
           with open('XCreds.xcodeproj/project.pbxproj', 'r', encoding='utf-8') as f:
               pbx = f.read()
 
-          swift_files = set(re.findall(r'/\*\s*([a-zA-Z0-9_\-]+\.swift)\s+in\s+Sources', pbx))
+          referenced_swifts = set(re.findall(r'/\*\s*([a-zA-Z0-9_\-]+\.swift)\s+in\s+Sources', pbx))
           stubs = {
               "LoggerHelper.swift": "import Foundation\n@objc public class LoggerHelper: NSObject { @objc public static let shared = LoggerHelper(); @objc public static func log(_ msg: String) {} }",
               "UNIXUtilities.swift": "import Foundation\n@objc public class UNIXUtilities: NSObject { @objc public static func run(command: String, arguments: [String] = []) -> String { return \"\" } }",
@@ -60,74 +85,51 @@ jobs:
               "UserSecretManager.swift": "import Foundation\n@objc public class UserSecretManager: NSObject { @objc public static let shared = UserSecretManager(); @objc public func saveSecret(_ secret: String, for user: String) -> Bool { return true }; @objc public func getSecret(for user: String) -> String? { return nil } }",
               "FDESetupHelper.swift": "import Foundation\n@objc public class FDESetupHelper: NSObject { @objc public static let shared = FDESetupHelper(); @objc public static func isFDEEnabled() -> Bool { return false }; @objc public static func isEnabled() -> Bool { return false }; @objc public static func addAuthUser(username: String, password: String) -> Bool { return true }; @objc public static func checkFileVaultStatus() -> [String: Any] { return [:] } }"
           }
-          for s_name in swift_files:
-              fpath = os.path.join(tools_dir, s_name)
+
+          for s_file in referenced_swifts:
+              fpath = os.path.join(tools_dir, s_file)
               if not os.path.exists(fpath):
-                  content = stubs.get(s_name, "import Foundation\n")
+                  content = stubs.get(s_file, "import Foundation\n")
                   with open(fpath, 'w', encoding='utf-8') as f:
                       f.write(content)
 
-          # 3. 扫描并补齐所有 Bridging Header 中的 Framework / 头文件引用
-          headers = {
-              'TCSKeychain.h': """#ifndef TCSKeychain_h
-          #define TCSKeychain_h
-          #import <Foundation/Foundation.h>
-          #import <Security/Security.h>
-          @interface TCSKeychain : NSObject
-          + (instancetype)sharedKeychain;
-          + (NSString *)passwordForService:(NSString *)service account:(NSString *)account;
-          + (BOOL)setPassword:(NSString *)password forService:(NSString *)service account:(NSString *)account;
-          + (BOOL)deletePasswordForService:(NSString *)service account:(NSString *)account;
-          @end
-          #endif
-          """,
-              'TCSUnifiedLogger.h': """#ifndef TCSUnifiedLogger_h
-          #define TCSUnifiedLogger_h
-          #import <Foundation/Foundation.h>
-          @interface TCSUnifiedLogger : NSObject
-          + (instancetype)shared;
-          + (instancetype)sharedLogger;
-          + (void)log:(NSString *)format, ...;
-          @end
-          #endif
-          """
-          }
-          sys_pfx = ('Foundation', 'Security', 'Cocoa', 'LocalAuthentication', 'AppKit', 'CoreServices')
+          # 清理桥接文件中指向不存在文件的 #import
           for root, dirs, files in os.walk('.'):
               if '.git' in root or 'build' in root: continue
               for f in files:
                   if 'Bridging-Header' in f and f.endswith('.h'):
-                      with open(os.path.join(root, f), 'r', encoding='utf-8', errors='ignore') as fp:
-                          for line in fp:
-                              m = re.search(r'#import\s+[<"]([^>"]+)[>"]', line)
-                              if m:
-                                  path_str = m.group(1)
-                                  if any(path_str.startswith(p) for p in sys_pfx): continue
-                                  if '/' in path_str:
-                                      fw, hn = path_str.split('/', 1)
-                                      fw_h_dir = f'Carthage/Build/Mac/{fw}.framework/Headers'
-                                      os.makedirs(fw_h_dir, exist_ok=True)
-                                      dest = os.path.join(fw_h_dir, hn)
-                                      if not os.path.exists(dest):
-                                          with open(dest, 'w', encoding='utf-8') as hf:
-                                              hf.write(f"#ifndef {hn.replace('.','_')}\n#define {hn.replace('.','_')}\n#import <Foundation/Foundation.h>\n@interface {fw} : NSObject\n@end\n#endif\n")
-                                  else:
-                                      hn = path_str
-                                      content = headers.get(hn, f"#ifndef {hn.replace('.','_')}\n#define {hn.replace('.','_')}\n#import <Foundation/Foundation.h>\n@interface {hn.replace('.h','')} : NSObject\n@end\n#endif\n")
-                                      for d in [tools_dir, 'XCreds', 'XCredsLoginPlugIn', 'tap', 'XCreds AutoFill Extension', 'XCreds Login Overlay']:
-                                          if os.path.exists(d):
-                                              df = os.path.join(d, hn)
-                                              if not os.path.exists(df):
-                                                  with open(df, 'w', encoding='utf-8') as out_f:
-                                                      out_f.write(content)
-
-          print("[SUCCESS] ProductLicense 与所有依赖组件注入完成。")
+                      fpath = os.path.join(root, f)
+                      with open(fpath, 'r', encoding='utf-8') as fp:
+                          lines = fp.readlines()
+                      new_lines = []
+                      for line in lines:
+                          m = re.match(r'^\s*#import\s+["<]([^">]+)[">]', line)
+                          if m:
+                              h_name = m.group(1)
+                              if h_name.startswith(('Foundation', 'Security', 'Cocoa', 'LocalAuthentication')):
+                                  new_lines.append(line)
+                                  continue
+                              exists = False
+                              for r_c, _, f_c in os.walk('.'):
+                                  if '.git' in r_c or 'build' in r_c: continue
+                                  if h_name in f_c:
+                                      exists = True
+                                      break
+                              if exists:
+                                  new_lines.append(line)
+                              else:
+                                  new_lines.append(f"// {line}")
+                          else:
+                              new_lines.append(line)
+                      with open(fpath, 'w', encoding='utf-8') as fp:
+                          fp.writelines(new_lines)
           EOF
 
-      # 4. 注入 Issue #107 补丁（彻底去时间与许可限制）
-      - name: Apply Issue #107 Unlimited License Patch
+      # 6. 注入 Issue #107 补丁 (解除 14 天限制)
+      - name: Apply Unlimited License Patch
         run: |
-          echo "[INFO] 正在注入永久有效授权补丁 (LicenseChecker -> .valid)..."
+          cd repo
+          echo "[INFO] 正在注入永久授权补丁..."
           python3 - << 'EOF'
           import os, re
           for root, dirs, files in os.walk('.'):
@@ -140,43 +142,44 @@ jobs:
                       code = re.sub(pattern, r"\1\n        return .valid", code, count=1)
                       with open(path, 'w', encoding='utf-8') as f:
                           f.write(code)
-                      print(f"[SUCCESS] 已注入补丁: {path}")
+                      print(f"[SUCCESS] 补丁注入成功: {path}")
           EOF
 
-      # 5. 执行 Release 构建（使用 Ad-hoc 签名并清空开发者 Team 绑定）
+      # 7. 免证书构建 Release
       - name: Build XCreds Release
         run: |
+          cd repo
+          echo "[INFO] 正在编译 Release 版本..."
           xcodebuild -project XCreds.xcodeproj \
                      -scheme "XCreds" \
                      -configuration Release \
-                     -derivedDataPath ./build \
+                     -derivedDataPath ./build_output \
                      CODE_SIGN_IDENTITY="-" \
                      CODE_SIGNING_REQUIRED=NO \
                      CODE_SIGNING_ALLOWED=YES \
-                     DEVELOPMENT_TEAM="" \
-                     PROVISIONING_PROFILE_SPECIFIER="" \
                      clean build
 
-      # 6. 读取真实版本并打包为 PKG
-      - name: Create Distribution PKG
+      # 8. 打包为 PKG
+      - name: Package Distribution PKG
         run: |
-          APP_PATH="./build/Build/Products/Release/XCreds.app"
-          APP_VERSION=$(defaults read "$(pwd)/$APP_PATH/Contents/Info.plist" CFBundleShortVersionString 2>/dev/null || echo "latest")
-          echo "打包版本: v${APP_VERSION}"
+          cd repo
+          echo "[INFO] 正在生成安装包..."
+          APP_PATH="./build_output/Build/Products/Release/XCreds.app"
+          APP_VERSION=$(defaults read "$(pwd)/$APP_PATH/Contents/Info.plist" CFBundleShortVersionString 2>/dev/null || echo "5.9.1")
           
           mkdir -p pkg_root/Applications
           cp -R "$APP_PATH" pkg_root/Applications/
-          
+
           pkgbuild --root pkg_root \
-                   --identifier com.twocanoes.xcreds \
+                   --identifier com.opensource.xcreds \
                    --version "${APP_VERSION}" \
                    --install-location / \
-                   XCreds-Unlimited.pkg
+                   ../XCreds-5.9.1-Unlimited.pkg
 
-      # 7. 上传生成的 PKG 到 Artifacts
+      # 9. 上传生成的 PKG
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: XCreds-Unlimited-PKG
-          path: XCreds-Unlimited.pkg
+          name: XCreds-5.9.1-Unlimited-PKG
+          path: XCreds-5.9.1-Unlimited.pkg
           retention-days: 7
