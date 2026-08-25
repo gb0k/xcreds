@@ -32,11 +32,11 @@ jobs:
           sudo xcode-select -switch "$LATEST_XCODE/Contents/Developer"
           xcodebuild -version
 
-      # 3. 构造 ProductLicense 虚拟框架并补齐包括 SecretKeeper / UserSecretManager / filevaultAuth 在内的完整依赖
+      # 3. 构造 ProductLicense 虚拟框架并补齐包括 adminCredentials 在内的全部依赖
       - name: Build Mock Framework & Complete All Stubs
         run: |
           cd repo
-          echo "[INFO] 正在就地构建 ProductLicense.framework 与所有精准依赖桩代码..."
+          echo "[INFO] 正在就地构建 ProductLicense.framework 与所有依赖桩代码..."
 
           # 1. 创建合法的 macOS ProductLicense.framework 二进制与 ModuleMap
           FRAMEWORK_DIR="Carthage/Build/Mac/ProductLicense.framework"
@@ -91,7 +91,7 @@ jobs:
           ln -sf A Versions/Current
           cd ../../../../
 
-          # 2. 补齐所有独立 Swift 源码与方法
+          # 2. 补齐所有独立 Swift 源码文件
           python3 - << 'EOF'
           import os, re
 
@@ -162,7 +162,7 @@ jobs:
           }
           """)
 
-          # 3. SecretKeeper.swift (支持 throws 构造器与带参初始化)
+          # 3. SecretKeeper.swift
           with open(os.path.join(tools_dir, 'SecretKeeper.swift'), 'w', encoding='utf-8') as f:
               f.write("""import Foundation
 
@@ -182,7 +182,45 @@ jobs:
           }
           """)
 
-          # 4. UserSecretManager.swift (支持 SecretKeeper 注入构造器)
+          # 4. UsernamePassword.swift (包含具有 String 类型 username/password 的类)
+          with open(os.path.join(tools_dir, 'UsernamePassword.swift'), 'w', encoding='utf-8') as f:
+              f.write("""import Foundation
+
+          @objc(UsernamePassword)
+          @objcMembers
+          public class UsernamePassword: NSObject {
+              public var username: String = ""
+              public var password: String = ""
+              public var domain: String?
+              public override init() { super.init() }
+              public init(username: String?, password: String?) {
+                  self.username = username ?? ""
+                  self.password = password ?? ""
+                  super.init()
+              }
+              public init(username: String?, password: String?, domain: String?) {
+                  self.username = username ?? ""
+                  self.password = password ?? ""
+                  self.domain = domain
+                  super.init()
+              }
+          }
+
+          @objc(LocalAdminCredentials)
+          @objcMembers
+          public class LocalAdminCredentials: NSObject {
+              public var username: String = ""
+              public var password: String = ""
+              public override init() { super.init() }
+              public init(username: String? = nil, password: String? = nil) {
+                  self.username = username ?? ""
+                  self.password = password ?? ""
+                  super.init()
+              }
+          }
+          """)
+
+          # 5. UserSecretManager.swift (包含 adminCredentials 方法)
           with open(os.path.join(tools_dir, 'UserSecretManager.swift'), 'w', encoding='utf-8') as f:
               f.write("""import Foundation
 
@@ -200,10 +238,16 @@ jobs:
               public func getSecret(for user: String) -> String? { return nil }
               public static func saveSecret(_ secret: String, for user: String) -> Bool { return true }
               public static func getSecret(for user: String) -> String? { return nil }
+              public func adminCredentials() throws -> UsernamePassword {
+                  return UsernamePassword(username: "", password: "")
+              }
+              public static func adminCredentials() throws -> UsernamePassword {
+                  return UsernamePassword(username: "", password: "")
+              }
           }
           """)
 
-          # 5. FDESetupHelper.swift (包含全局 filevaultAuth 与 FDESetupHelper 类)
+          # 6. FDESetupHelper.swift
           with open(os.path.join(tools_dir, 'FDESetupHelper.swift'), 'w', encoding='utf-8') as f:
               f.write("""import Foundation
 
@@ -223,44 +267,6 @@ jobs:
               public func isEnabled() -> Bool { return false }
               public func addAuthUser(username: String, password: String) -> Bool { return true }
               public func filevaultAuth(username: String?, password: String?) -> Bool { return true }
-          }
-          """)
-
-          # 6. UsernamePassword.swift
-          with open(os.path.join(tools_dir, 'UsernamePassword.swift'), 'w', encoding='utf-8') as f:
-              f.write("""import Foundation
-
-          @objc(UsernamePassword)
-          @objcMembers
-          public class UsernamePassword: NSObject {
-              public var username: String?
-              public var password: String?
-              public var domain: String?
-              public override init() { super.init() }
-              public init(username: String?, password: String?) {
-                  self.username = username
-                  self.password = password
-                  super.init()
-              }
-              public init(username: String?, password: String?, domain: String?) {
-                  self.username = username
-                  self.password = password
-                  self.domain = domain
-                  super.init()
-              }
-          }
-
-          @objc(LocalAdminCredentials)
-          @objcMembers
-          public class LocalAdminCredentials: NSObject {
-              public var username: String?
-              public var password: String?
-              public override init() { super.init() }
-              public init(username: String? = nil, password: String? = nil) {
-                  self.username = username
-                  self.password = password
-                  super.init()
-              }
           }
           """)
 
@@ -356,7 +362,7 @@ jobs:
                   with open(os.path.join(d, h_name), 'w', encoding='utf-8') as f:
                       f.write(code)
 
-          print("[SUCCESS] 包含 SecretKeeper / UserSecretManager / filevaultAuth 的完整工具链已就绪。")
+          print("[SUCCESS] 包含 adminCredentials() 的完整工具链已就绪。")
           EOF
 
       # 4. 注入 Issue #107 永久有效授权补丁
