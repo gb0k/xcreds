@@ -29,13 +29,13 @@ jobs:
           sudo xcode-select -switch "$LATEST_XCODE/Contents/Developer"
           xcodebuild -version
 
-      # 3. 构造标准 ProductLicense.framework 二进制、Mock 头文件与强化 Swift 桩代码
-      - name: Build Standard Mock Framework & Swift Stubs
+      # 3. 构造 ProductLicense.framework 二进制、分靶向 Swift 桩代码与 Mock 头文件
+      - name: Build Mock Framework, Isolated Stubs & Headers
         run: |
           cd repo
-          echo "[INFO] 正在构建标准 ProductLicense.framework 与依赖桩代码..."
-          
-          # 1. 创建合法的 macOS Framework 目录结构并编译 Mach-O 二进制
+          echo "[INFO] 正在构建 ProductLicense.framework 与精准依赖..."
+
+          # 1. 编译合法的 macOS ProductLicense.framework 二进制与 ModuleMap
           FRAMEWORK_DIR="Carthage/Build/Mac/ProductLicense.framework"
           mkdir -p "$FRAMEWORK_DIR/Versions/A/Headers"
           mkdir -p "$FRAMEWORK_DIR/Versions/A/Modules"
@@ -80,7 +80,6 @@ jobs:
           </plist>
           EOF
 
-          # 构建 Framework 标准软链接
           cd "$FRAMEWORK_DIR"
           ln -sf Versions/A/Headers Headers
           ln -sf Versions/A/Modules Modules
@@ -89,76 +88,18 @@ jobs:
           ln -sf A Versions/Current
           cd ../../../../
 
-          # 2. 补齐 Objective-C 头文件与全能 Swift 依赖桩代码
+          # 2. 生成无冲突的 Swift 桩代码，并解决 xcredstap 的 TCSLog 隔离定义
           python3 - << 'EOF'
           import os
 
-          headers_content = {
-              "TCSKeychain.h": """#pragma once
-          #import <Foundation/Foundation.h>
-          #import <Security/Security.h>
-          @interface TCSKeychain : NSObject
-          + (instancetype)sharedKeychain;
-          + (instancetype)shared;
-          + (NSString *)passwordForService:(NSString *)service account:(NSString *)account;
-          + (BOOL)setPassword:(NSString *)password forService:(NSString *)service account:(NSString *)account;
-          + (BOOL)deletePasswordForService:(NSString *)service account:(NSString *)account;
-          + (id)findItemForService:(NSString *)service account:(NSString *)account;
-          + (BOOL)addItem:(id)item forService:(NSString *)service account:(NSString *)account;
-          + (BOOL)deleteItemForService:(NSString *)service account:(NSString *)account;
-          - (NSString *)passwordForService:(NSString *)service account:(NSString *)account;
-          - (BOOL)setPassword:(NSString *)password forService:(NSString *)service account:(NSString *)account;
-          - (BOOL)deletePasswordForService:(NSString *)service account:(NSString *)account;
-          @end
-          """,
-              "TCSUnifiedLogger.h": """#pragma once
-          #import <Foundation/Foundation.h>
-          @interface TCSUnifiedLogger : NSObject
-          + (instancetype)shared;
-          + (instancetype)sharedLogger;
-          + (void)log:(NSString *)format, ...;
-          - (void)log:(NSString *)format, ...;
-          @end
-          """,
-              "TCTaskHelper.h": """#pragma once
-          #import <Foundation/Foundation.h>
-          @interface TCTaskHelper : NSObject
-          + (NSString *)runTaskWithCommand:(NSString *)command arguments:(NSArray *)arguments;
-          + (NSString *)runTask:(NSString *)command arguments:(NSArray *)arguments;
-          @end
-          """,
-              "TCTaskWrapperWithBlocks.h": """#pragma once
-          #import <Foundation/Foundation.h>
-          @interface TCTaskWrapperWithBlocks : NSObject
-          @property (copy) void (^outputBlock)(NSString *output);
-          @property (copy) void (^errorBlock)(NSString *error);
-          @property (copy) void (^completionBlock)(int exitCode);
-          - (void)startProcess;
-          - (void)stopProcess;
-          @end
-          """
-          }
-
-          target_dirs = [
-              'XCreds',
-              'XCreds AutoFill Extension',
-              'XCreds Login Overlay',
-              'XCredsLoginPlugIn',
-              'tap',
-              'tcsopensourcetools/TCSOpenSourceTools/tools',
-              'tcsopensourcetools/TCSOpenSourceTools',
-              'tcsopensourcetools'
-          ]
-          for d in target_dirs:
-              os.makedirs(d, exist_ok=True)
-              for h_name, code in headers_content.items():
-                  with open(os.path.join(d, h_name), 'w', encoding='utf-8') as f:
-                      f.write(code)
-
           tools_dir = 'tcsopensourcetools/TCSOpenSourceTools/tools'
-          swift_stubs = {
-              "LoggerHelper.swift": """import Foundation
+          os.makedirs(tools_dir, exist_ok=True)
+
+          # 纯净 LoggerHelper（不带全局 TCSLog，避免与 LogShim.swift 重名冲突）
+          with open(os.path.join(tools_dir, 'LoggerHelper.swift'), 'w', encoding='utf-8') as f:
+              f.write("""import Foundation
           import os.log
+
           @objc(LoggerHelper)
           @objcMembers
           public class LoggerHelper: NSObject {
@@ -169,7 +110,20 @@ jobs:
                   return os.log.OSLog(subsystem: "com.twocanoes.xcreds", category: "main")
               }
           }
-          """,
+          """)
+
+          # 为缺少 LogShim 的 tap 模块单独注入私有 TCSLog
+          tap_driver = 'tap/TokenDriver.swift'
+          if os.path.exists(tap_driver):
+              with open(tap_driver, 'r', encoding='utf-8') as f:
+                  code = f.read()
+              if 'func TCSLog(' not in code:
+                  with open(tap_driver, 'a', encoding='utf-8') as f:
+                      f.write("\n\nfileprivate func TCSLog(_ format: String, _ args: CVarArg...) {\n    NSLog(format, args)\n}\n")
+                  print("[SUCCESS] 已为 tap 模块注入隔离日志声明。")
+
+          # 补齐其他辅助工具类
+          swift_stubs = {
               "UNIXUtilities.swift": """import Foundation
           @objc(UNIXUtilities)
           @objcMembers
@@ -247,7 +201,69 @@ jobs:
               with open(os.path.join(tools_dir, s_name), 'w', encoding='utf-8') as f:
                   f.write(code)
 
-          print("[SUCCESS] 依赖补齐就绪。")
+          # 3. 补齐 Objective-C 头文件
+          headers_content = {
+              "TCSKeychain.h": """#pragma once
+          #import <Foundation/Foundation.h>
+          #import <Security/Security.h>
+          @interface TCSKeychain : NSObject
+          + (instancetype)sharedKeychain;
+          + (instancetype)shared;
+          + (NSString *)passwordForService:(NSString *)service account:(NSString *)account;
+          + (BOOL)setPassword:(NSString *)password forService:(NSString *)service account:(NSString *)account;
+          + (BOOL)deletePasswordForService:(NSString *)service account:(NSString *)account;
+          + (id)findItemForService:(NSString *)service account:(NSString *)account;
+          + (BOOL)addItem:(id)item forService:(NSString *)service account:(NSString *)account;
+          + (BOOL)deleteItemForService:(NSString *)service account:(NSString *)account;
+          - (NSString *)passwordForService:(NSString *)service account:(NSString *)account;
+          - (BOOL)setPassword:(NSString *)password forService:(NSString *)service account:(NSString *)account;
+          - (BOOL)deletePasswordForService:(NSString *)service account:(NSString *)account;
+          @end
+          """,
+              "TCSUnifiedLogger.h": """#pragma once
+          #import <Foundation/Foundation.h>
+          @interface TCSUnifiedLogger : NSObject
+          + (instancetype)shared;
+          + (instancetype)sharedLogger;
+          + (void)log:(NSString *)format, ...;
+          - (void)log:(NSString *)format, ...;
+          @end
+          """,
+              "TCTaskHelper.h": """#pragma once
+          #import <Foundation/Foundation.h>
+          @interface TCTaskHelper : NSObject
+          + (NSString *)runTaskWithCommand:(NSString *)command arguments:(NSArray *)arguments;
+          + (NSString *)runTask:(NSString *)command arguments:(NSArray *)arguments;
+          @end
+          """,
+              "TCTaskWrapperWithBlocks.h": """#pragma once
+          #import <Foundation/Foundation.h>
+          @interface TCTaskWrapperWithBlocks : NSObject
+          @property (copy) void (^outputBlock)(NSString *output);
+          @property (copy) void (^errorBlock)(NSString *error);
+          @property (copy) void (^completionBlock)(int exitCode);
+          - (void)startProcess;
+          - (void)stopProcess;
+          @end
+          """
+          }
+          target_dirs = [
+              'XCreds',
+              'XCreds AutoFill Extension',
+              'XCreds Login Overlay',
+              'XCredsLoginPlugIn',
+              'tap',
+              'tcsopensourcetools/TCSOpenSourceTools/tools',
+              'tcsopensourcetools/TCSOpenSourceTools',
+              'tcsopensourcetools'
+          ]
+          for d in target_dirs:
+              os.makedirs(d, exist_ok=True)
+              for h_name, code in headers_content.items():
+                  with open(os.path.join(d, h_name), 'w', encoding='utf-8') as f:
+                      f.write(code)
+
+          print("[SUCCESS] 依赖补齐与隔离处理完毕。")
           EOF
 
       # 4. 注入 Issue #107 补丁 (解除时间与授权限制)
