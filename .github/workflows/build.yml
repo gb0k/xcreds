@@ -15,7 +15,7 @@ jobs:
   build-and-package:
     runs-on: macos-14
     steps:
-      # 1. 检出指定 Tag 源码
+      # 1. 检出指定 Tag 源码 (跳过私有 Bitbucket 子模块)
       - name: Checkout Specific Upstream Tag
         uses: actions/checkout@v4
         with:
@@ -87,8 +87,8 @@ jobs:
           ln -sf Versions/A/ProductLicense "$FRAMEWORK_DIR/ProductLicense"
           ln -sf A "$FRAMEWORK_DIR/Versions/Current"
 
-      # 4. 修复 DefaultsOverride 宏冲突并注入全量 Swift/ObjC 工具链
-      - name: Patch DefaultsOverride & Generate All Toolchain Files
+      # 4. 全局自动平替 PrefKeys 并生成全量 Swift / ObjC 工具链
+      - name: Patch PrefKeys Scope & Generate All Toolchain Files
         run: |
           python3 - << 'EOF'
           import os, re, shutil
@@ -97,28 +97,22 @@ jobs:
           tools_dir = os.path.join(repo_root, 'tcsopensourcetools', 'TCSOpenSourceTools', 'tools')
           os.makedirs(tools_dir, exist_ok=True)
 
-          # 1. 修复 DefaultsOverride.swift 中的 PrefKeys 引用
+          # 1. 全局平替所有 Swift 文件中的 PrefKeys.<key>.rawValue 为字面量字符串 "<key>"
           for root, dirs, files in os.walk(repo_root):
-              if 'DefaultsOverride.swift' in files:
-                  fpath = os.path.join(root, 'DefaultsOverride.swift')
-                  with open(fpath, 'r', encoding='utf-8') as f:
-                      code = f.read()
-                  code = code.replace('PrefKeys.settingsOverrideScriptPath.rawValue', '"settingsOverrideScriptPath"')
-                  with open(fpath, 'w', encoding='utf-8') as f:
-                      f.write(code)
-                  print(f"[PATCH] 已修复 DefaultsOverride.swift: {fpath}")
+              if '.git' in root or 'build_output' in root:
+                  continue
+              for f in files:
+                  if f.endswith('.swift'):
+                      fpath = os.path.join(root, f)
+                      with open(fpath, 'r', encoding='utf-8') as fp:
+                          code = fp.read()
+                      if 'PrefKeys.' in code:
+                          new_code = re.sub(r'PrefKeys\.([a-zA-Z0-9_]+)\.rawValue', r'"\1"', code)
+                          with open(fpath, 'w', encoding='utf-8') as fp:
+                              fp.write(new_code)
+                          print(f"[PATCH] PrefKeys 作用域修复: {f}")
 
-          # 2. 移除 PrefKeys.swift 中的 AUTOFILL_TARGET 限制
-          for root, dirs, files in os.walk(repo_root):
-              if 'PrefKeys.swift' in files:
-                  fpath = os.path.join(root, 'PrefKeys.swift')
-                  with open(fpath, 'r', encoding='utf-8') as f:
-                      code = f.read()
-                  code = re.sub(r'#if\s+!AUTOFILL_TARGET', '#if true', code)
-                  with open(fpath, 'w', encoding='utf-8') as f:
-                      f.write(code)
-
-          # 3. 消除 LogShim.swift 中的重复 TCSLog 定义
+          # 2. 消除 LogShim.swift 中的重复 TCSLog 定义
           for root, dirs, files in os.walk(repo_root):
               if 'LogShim.swift' in files:
                   fpath = os.path.join(root, 'LogShim.swift')
@@ -129,7 +123,7 @@ jobs:
                   with open(fpath, 'w', encoding='utf-8') as f:
                       f.write(code)
 
-          # 4. Swift 源码文件
+          # 3. 生成全套独立 Swift 源码
           swift_files = {
               "LoggerHelper.swift": """import Foundation
           import os
@@ -284,7 +278,7 @@ jobs:
               with open(os.path.join(tools_dir, fname), 'w', encoding='utf-8') as f:
                   f.write(code)
 
-          # 5. Objective-C 源码与分类实现文件
+          # 4. 生成 Objective-C 源码与分类实现文件 (.h & .m)
           objc_files = {
               "TCSUnifiedLogger.h": """#pragma once
           #import <Foundation/Foundation.h>
@@ -385,7 +379,7 @@ jobs:
               with open(os.path.join(tools_dir, fname), 'w', encoding='utf-8') as f:
                   f.write(code)
 
-          # 6. 自动扫描 project.pbxproj 兜底
+          # 5. 自动扫描 project.pbxproj 兜底
           pbx_path = os.path.join(repo_root, 'XCreds.xcodeproj', 'project.pbxproj')
           with open(pbx_path, 'r', encoding='utf-8') as f:
               pbx = f.read()
@@ -410,7 +404,7 @@ jobs:
                   with open(fpath, 'w', encoding='utf-8') as f:
                       f.write(content)
 
-          # 7. 全量同步分发到所有潜在目录
+          # 6. 全量同步分发到所有潜在目录
           target_subs = [
               'tcsopensourcetools',
               'tcsopensourcetools/TCSOpenSourceTools',
@@ -429,7 +423,7 @@ jobs:
                   if os.path.isfile(src_f):
                       shutil.copy2(src_f, os.path.join(dest_dir, item))
 
-          print("[SUCCESS] 源码修复与依赖分发完成。")
+          print("[SUCCESS] PrefKeys 作用域修复与工具链就绪。")
           EOF
 
       # 5. 编译前严格校验物理文件
@@ -439,7 +433,7 @@ jobs:
           echo "[CHECK] 校验目标目录: $TARGET_DIR"
           test -f "$TARGET_DIR/TCSUnifiedLogger.m" || (echo "错误：TCSUnifiedLogger.m 不存在！"; exit 1)
           test -f "$TARGET_DIR/NSFileManager+TCSRealHomeFolder.m" || (echo "错误：NSFileManager+TCSRealHomeFolder.m 不存在！"; exit 1)
-          echo "[CHECK] 核心文件物理校验通过！"
+          echo "[CHECK] 核心文件物理校验 100% 通过！"
 
       # 6. 注入 Issue #107 永久有效授权补丁
       - name: Apply Issue #107 Unlimited License Patch
