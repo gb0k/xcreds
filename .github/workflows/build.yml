@@ -32,11 +32,11 @@ jobs:
           sudo xcode-select -switch "$LATEST_XCODE/Contents/Developer"
           xcodebuild -version
 
-      # 3. 构造 ProductLicense 虚拟框架并补齐全部日志宏、控制台工具与 Data Hex 扩展
-      - name: Build Mock Framework & Complete All Missing Functions
+      # 3. 构造 ProductLicense 虚拟框架并补齐包括 cliTask 在内的全部依赖
+      - name: Build Mock Framework & Complete All Stubs
         run: |
           cd repo
-          echo "[INFO] 正在构建 ProductLicense.framework 与完整 Swift 工具链..."
+          echo "[INFO] 正在就地构建 ProductLicense.framework 与所有独立桩代码..."
 
           # 1. 创建合法的 macOS ProductLicense.framework 二进制与 ModuleMap
           FRAMEWORK_DIR="Carthage/Build/Mac/ProductLicense.framework"
@@ -91,7 +91,7 @@ jobs:
           ln -sf A Versions/Current
           cd ../../../../
 
-          # 2. 补齐全部独立的 Swift 扩展与工具函数
+          # 2. 补齐所有 Xcode 项目文件中声明的独立 Swift 源码文件
           python3 - << 'EOF'
           import os, re
 
@@ -109,7 +109,7 @@ jobs:
           tools_dir = 'tcsopensourcetools/TCSOpenSourceTools/tools'
           os.makedirs(tools_dir, exist_ok=True)
 
-          # 1. LoggerHelper.swift (全套日志级别宏与 getConsoleUser)
+          # 1. LoggerHelper.swift (包含全套日志级别宏与 getConsoleUser)
           with open(os.path.join(tools_dir, 'LoggerHelper.swift'), 'w', encoding='utf-8') as f:
               f.write("""import Foundation
           import os
@@ -141,7 +141,28 @@ jobs:
           }
           """)
 
-          # 2. DataExtension.swift (完整支持 hexEncodedString 与 fromHexEncodedString)
+          # 2. UNIXUtilities.swift (包含全局 cliTask 与 UNIXUtilities 类)
+          with open(os.path.join(tools_dir, 'UNIXUtilities.swift'), 'w', encoding='utf-8') as f:
+              f.write("""import Foundation
+
+          public func cliTask(_ command: String, arguments: [String] = []) -> String {
+              return ""
+          }
+
+          public func cliTask(_ command: String) -> String {
+              return ""
+          }
+
+          @objc(UNIXUtilities)
+          @objcMembers
+          public class UNIXUtilities: NSObject {
+              public static func run(command: String, arguments: [String] = []) -> String { return "" }
+              public static func runCommand(_ command: String, args: [String] = []) -> String { return "" }
+              public static func cliTask(_ command: String, arguments: [String] = []) -> String { return "" }
+          }
+          """)
+
+          # 3. DataExtension.swift (完整支持 hexEncodedString 与 fromHexEncodedString)
           with open(os.path.join(tools_dir, 'DataExtension.swift'), 'w', encoding='utf-8') as f:
               f.write("""import Foundation
 
@@ -171,7 +192,7 @@ jobs:
           }
           """)
 
-          # 3. UsernamePassword.swift (包含 UsernamePassword 与 LocalAdminCredentials)
+          # 4. UsernamePassword.swift (包含 UsernamePassword 与 LocalAdminCredentials)
           with open(os.path.join(tools_dir, 'UsernamePassword.swift'), 'w', encoding='utf-8') as f:
               f.write("""import Foundation
 
@@ -206,18 +227,6 @@ jobs:
                   self.password = password
                   super.init()
               }
-          }
-          """)
-
-          # 4. UNIXUtilities.swift
-          with open(os.path.join(tools_dir, 'UNIXUtilities.swift'), 'w', encoding='utf-8') as f:
-              f.write("""import Foundation
-
-          @objc(UNIXUtilities)
-          @objcMembers
-          public class UNIXUtilities: NSObject {
-              public static func run(command: String, arguments: [String] = []) -> String { return "" }
-              public static func runCommand(_ command: String, args: [String] = []) -> String { return "" }
           }
           """)
 
@@ -332,7 +341,7 @@ jobs:
                   with open(os.path.join(d, h_name), 'w', encoding='utf-8') as f:
                       f.write(code)
 
-          print("[SUCCESS] 完整依赖函数与扩展定义注入完成。")
+          print("[SUCCESS] 包含 cliTask 的完整独立工具链创建完成。")
           EOF
 
       # 4. 注入 Issue #107 永久有效授权补丁
