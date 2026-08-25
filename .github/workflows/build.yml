@@ -32,11 +32,11 @@ jobs:
           sudo xcode-select -switch "$LATEST_XCODE/Contents/Developer"
           xcodebuild -version
 
-      # 3. 构造 ProductLicense.framework 二进制并补齐全部缺失类（包含 TCSLogWithMark & LocalAdminCredentials）
-      - name: Build Mock Framework & Complete All Stubs
+      # 3. 构造 ProductLicense 虚拟框架并统一合并注入 Swift / ObjC 依赖
+      - name: Build Mock Framework & Inject Unified Stubs
         run: |
           cd repo
-          echo "[INFO] 正在构建 ProductLicense.framework 与补全依赖桩代码..."
+          echo "[INFO] 正在构建 ProductLicense.framework 并注入消除歧义的依赖桩代码..."
 
           # 1. 创建合法的 macOS ProductLicense.framework 二进制与 ModuleMap
           FRAMEWORK_DIR="Carthage/Build/Mac/ProductLicense.framework"
@@ -91,7 +91,7 @@ jobs:
           ln -sf A Versions/Current
           cd ../../../../
 
-          # 2. 补齐所有 Swift 桩类与全局日志函数
+          # 2. 统一注入无歧义函数与已知工程编译文件
           python3 - << 'EOF'
           import os, re
 
@@ -109,21 +109,17 @@ jobs:
           tools_dir = 'tcsopensourcetools/TCSOpenSourceTools/tools'
           os.makedirs(tools_dir, exist_ok=True)
 
-          # 全面包含 TCSLog 与 TCSLogWithMark
+          # 1. 注入无歧义单签名的 LoggerHelper 与日志函数
           with open(os.path.join(tools_dir, 'LoggerHelper.swift'), 'w', encoding='utf-8') as f:
               f.write("""import Foundation
           import os
 
-          public func TCSLog(_ format: String, _ args: CVarArg...) {
-              NSLog(format, args)
+          public func TCSLog(_ message: String = "", _ args: CVarArg...) {
+              NSLog(message, args)
           }
 
-          public func TCSLogWithMark(_ message: String = "", file: String = #file, function: String = #function, line: Int = #line) {
-              NSLog("%@ [%ld]: %@", function, line, message)
-          }
-
-          public func TCSLogWithMark(_ format: String, _ args: CVarArg...) {
-              NSLog(format, args)
+          public func TCSLogWithMark(_ message: String = "", _ args: CVarArg...) {
+              NSLog(message, args)
           }
 
           @objc(LoggerHelper)
@@ -138,22 +134,10 @@ jobs:
           }
           """)
 
-          swift_stubs = {
-              "LocalAdminCredentials.swift": """import Foundation
-          @objc(LocalAdminCredentials)
-          @objcMembers
-          public class LocalAdminCredentials: NSObject {
-              public var username: String?
-              public var password: String?
-              public override init() { super.init() }
-              public init(username: String? = nil, password: String? = nil) {
-                  self.username = username
-                  self.password = password
-                  super.init()
-              }
-          }
-          """,
-              "UsernamePassword.swift": """import Foundation
+          # 2. 将 UsernamePassword 与 LocalAdminCredentials 合并注入 UsernamePassword.swift
+          with open(os.path.join(tools_dir, 'UsernamePassword.swift'), 'w', encoding='utf-8') as f:
+              f.write("""import Foundation
+
           @objc(UsernamePassword)
           @objcMembers
           public class UsernamePassword: NSObject {
@@ -173,22 +157,32 @@ jobs:
                   super.init()
               }
           }
-          """,
-              "UNIXUtilities.swift": """import Foundation
+
+          @objc(LocalAdminCredentials)
+          @objcMembers
+          public class LocalAdminCredentials: NSObject {
+              public var username: String?
+              public var password: String?
+              public override init() { super.init() }
+              public init(username: String? = nil, password: String? = nil) {
+                  self.username = username
+                  self.password = password
+                  super.init()
+              }
+          }
+          """)
+
+          # 3. 注入 UNIXUtilities 与其他辅助单例
+          with open(os.path.join(tools_dir, 'UNIXUtilities.swift'), 'w', encoding='utf-8') as f:
+              f.write("""import Foundation
+
           @objc(UNIXUtilities)
           @objcMembers
           public class UNIXUtilities: NSObject {
               public static func run(command: String, arguments: [String] = []) -> String { return "" }
               public static func runCommand(_ command: String, args: [String] = []) -> String { return "" }
           }
-          """,
-              "DataExtension.swift": """import Foundation
-          extension Data {
-              public var hexString: String { map { String(format: "%02hhx", $0) }.joined() }
-              public var string: String? { String(data: self, encoding: .utf8) }
-          }
-          """,
-              "SecretKeeper.swift": """import Foundation
+
           @objc(SecretKeeper)
           @objcMembers
           public class SecretKeeper: NSObject {
@@ -200,8 +194,7 @@ jobs:
               public static func getPassword(for account: String) -> String? { return nil }
               public static func deletePassword(for account: String) -> Bool { return true }
           }
-          """,
-              "UserSecretManager.swift": """import Foundation
+
           @objc(UserSecretManager)
           @objcMembers
           public class UserSecretManager: NSObject {
@@ -211,8 +204,7 @@ jobs:
               public static func saveSecret(_ secret: String, for user: String) -> Bool { return true }
               public static func getSecret(for user: String) -> String? { return nil }
           }
-          """,
-              "FDESetupHelper.swift": """import Foundation
+
           @objc(FDESetupHelper)
           @objcMembers
           public class FDESetupHelper: NSObject {
@@ -224,12 +216,18 @@ jobs:
               public func isFDEEnabled() -> Bool { return false }
               public func isEnabled() -> Bool { return false }
           }
-          """
-          }
-          for s_name, code in swift_stubs.items():
-              with open(os.path.join(tools_dir, s_name), 'w', encoding='utf-8') as f:
-                  f.write(code)
+          """)
 
+          # 4. 注入 DataExtension
+          with open(os.path.join(tools_dir, 'DataExtension.swift'), 'w', encoding='utf-8') as f:
+              f.write("""import Foundation
+          extension Data {
+              public var hexString: String { map { String(format: "%02hhx", $0) }.joined() }
+              public var string: String? { String(data: self, encoding: .utf8) }
+          }
+          """)
+
+          # 5. 补齐 Objective-C 头文件
           headers_content = {
               "TCSKeychain.h": """#pragma once
           #import <Foundation/Foundation.h>
@@ -291,7 +289,7 @@ jobs:
                   with open(os.path.join(d, h_name), 'w', encoding='utf-8') as f:
                       f.write(code)
 
-          print("[SUCCESS] 依赖与符号全部补齐。")
+          print("[SUCCESS] 统一依赖与无歧义符号注入完成。")
           EOF
 
       # 4. 注入 Issue #107 永久有效授权补丁
