@@ -15,7 +15,7 @@ jobs:
   build-and-package:
     runs-on: macos-14
     steps:
-      # 1. 精准拉取官方指定 Tag
+      # 1. 检出指定 Tag 源码
       - name: Checkout Specific Upstream Tag
         uses: actions/checkout@v4
         with:
@@ -32,7 +32,7 @@ jobs:
           sudo xcode-select -switch "$LATEST_XCODE/Contents/Developer"
           xcodebuild -version
 
-      # 3. 绝对路径创建 ProductLicense 虚拟 Framework
+      # 3. 绝对路径构建 ProductLicense 虚拟框架
       - name: Build Mock ProductLicense Framework
         run: |
           REPO_ROOT="$GITHUB_WORKSPACE/repo"
@@ -81,15 +81,14 @@ jobs:
           </plist>
           EOF
 
-          # 建立软链接 (使用绝对路径)
           ln -sf Versions/A/Headers "$FRAMEWORK_DIR/Headers"
           ln -sf Versions/A/Modules "$FRAMEWORK_DIR/Modules"
           ln -sf Versions/A/Resources "$FRAMEWORK_DIR/Resources"
           ln -sf Versions/A/ProductLicense "$FRAMEWORK_DIR/ProductLicense"
           ln -sf A "$FRAMEWORK_DIR/Versions/Current"
 
-      # 4. 绝对路径全量生成所有 Swift / Objective-C (.h & .m) 源码实体
-      - name: Generate All Source Files With Absolute Paths
+      # 4. 修复 DefaultsOverride 宏冲突并注入全量 Swift/ObjC 工具链
+      - name: Patch DefaultsOverride & Generate All Toolchain Files
         run: |
           python3 - << 'EOF'
           import os, re, shutil
@@ -98,7 +97,28 @@ jobs:
           tools_dir = os.path.join(repo_root, 'tcsopensourcetools', 'TCSOpenSourceTools', 'tools')
           os.makedirs(tools_dir, exist_ok=True)
 
-          # 消除 LogShim.swift 中的重复 TCSLog 定义
+          # 1. 修复 DefaultsOverride.swift 中的 PrefKeys 引用
+          for root, dirs, files in os.walk(repo_root):
+              if 'DefaultsOverride.swift' in files:
+                  fpath = os.path.join(root, 'DefaultsOverride.swift')
+                  with open(fpath, 'r', encoding='utf-8') as f:
+                      code = f.read()
+                  code = code.replace('PrefKeys.settingsOverrideScriptPath.rawValue', '"settingsOverrideScriptPath"')
+                  with open(fpath, 'w', encoding='utf-8') as f:
+                      f.write(code)
+                  print(f"[PATCH] 已修复 DefaultsOverride.swift: {fpath}")
+
+          # 2. 移除 PrefKeys.swift 中的 AUTOFILL_TARGET 限制
+          for root, dirs, files in os.walk(repo_root):
+              if 'PrefKeys.swift' in files:
+                  fpath = os.path.join(root, 'PrefKeys.swift')
+                  with open(fpath, 'r', encoding='utf-8') as f:
+                      code = f.read()
+                  code = re.sub(r'#if\s+!AUTOFILL_TARGET', '#if true', code)
+                  with open(fpath, 'w', encoding='utf-8') as f:
+                      f.write(code)
+
+          # 3. 消除 LogShim.swift 中的重复 TCSLog 定义
           for root, dirs, files in os.walk(repo_root):
               if 'LogShim.swift' in files:
                   fpath = os.path.join(root, 'LogShim.swift')
@@ -109,7 +129,7 @@ jobs:
                   with open(fpath, 'w', encoding='utf-8') as f:
                       f.write(code)
 
-          # Swift 源码
+          # 4. Swift 源码文件
           swift_files = {
               "LoggerHelper.swift": """import Foundation
           import os
@@ -126,6 +146,9 @@ jobs:
           public func TCSLogWarningWithMark(_ message: String = "", _ args: CVarArg...) { NSLog(message, args) }
 
           public func getConsoleUser() -> String { return NSUserName() }
+          public func cliTask(_ command: String, arguments: [String] = [], waitForTermination: Bool = true) -> String { return "" }
+          public func cliTask(_ command: String, arguments: [String]) -> String { return "" }
+          public func cliTask(_ command: String) -> String { return "" }
 
           @objc(LoggerHelper)
           @objcMembers
@@ -137,10 +160,6 @@ jobs:
           }
           """,
               "UNIXUtilities.swift": """import Foundation
-
-          public func cliTask(_ command: String, arguments: [String] = [], waitForTermination: Bool = true) -> String { return "" }
-          public func cliTask(_ command: String, arguments: [String]) -> String { return "" }
-          public func cliTask(_ command: String) -> String { return "" }
 
           @objc(UNIXUtilities)
           @objcMembers
@@ -265,7 +284,7 @@ jobs:
               with open(os.path.join(tools_dir, fname), 'w', encoding='utf-8') as f:
                   f.write(code)
 
-          # Objective-C 头文件与 .m 实现
+          # 5. Objective-C 源码与分类实现文件
           objc_files = {
               "TCSUnifiedLogger.h": """#pragma once
           #import <Foundation/Foundation.h>
@@ -366,7 +385,7 @@ jobs:
               with open(os.path.join(tools_dir, fname), 'w', encoding='utf-8') as f:
                   f.write(code)
 
-          # 全自动扫描 project.pbxproj 兜底缺失文件
+          # 6. 自动扫描 project.pbxproj 兜底
           pbx_path = os.path.join(repo_root, 'XCreds.xcodeproj', 'project.pbxproj')
           with open(pbx_path, 'r', encoding='utf-8') as f:
               pbx = f.read()
@@ -391,7 +410,7 @@ jobs:
                   with open(fpath, 'w', encoding='utf-8') as f:
                       f.write(content)
 
-          # 同步全量工具链到所有可能引用的目录
+          # 7. 全量同步分发到所有潜在目录
           target_subs = [
               'tcsopensourcetools',
               'tcsopensourcetools/TCSOpenSourceTools',
@@ -410,18 +429,17 @@ jobs:
                   if os.path.isfile(src_f):
                       shutil.copy2(src_f, os.path.join(dest_dir, item))
 
-          print("[SUCCESS] 绝对路径注入完成。")
+          print("[SUCCESS] 源码修复与依赖分发完成。")
           EOF
 
-      # 5. 编译前严格校验文件物理存在性
+      # 5. 编译前严格校验物理文件
       - name: Verify Physical Existence Of Required Files
         run: |
           TARGET_DIR="$GITHUB_WORKSPACE/repo/tcsopensourcetools/TCSOpenSourceTools/tools"
           echo "[CHECK] 校验目标目录: $TARGET_DIR"
-          ls -la "$TARGET_DIR"
           test -f "$TARGET_DIR/TCSUnifiedLogger.m" || (echo "错误：TCSUnifiedLogger.m 不存在！"; exit 1)
           test -f "$TARGET_DIR/NSFileManager+TCSRealHomeFolder.m" || (echo "错误：NSFileManager+TCSRealHomeFolder.m 不存在！"; exit 1)
-          echo "[CHECK] 核心 .m 物理文件校验 100% 通过！"
+          echo "[CHECK] 核心文件物理校验通过！"
 
       # 6. 注入 Issue #107 永久有效授权补丁
       - name: Apply Issue #107 Unlimited License Patch
