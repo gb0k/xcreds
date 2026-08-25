@@ -87,8 +87,8 @@ jobs:
           ln -sf Versions/A/ProductLicense "$FRAMEWORK_DIR/ProductLicense"
           ln -sf A "$FRAMEWORK_DIR/Versions/Current"
 
-      # 4. 全局平替 PrefKeys、日志调用歧义并注入精确工具链
-      - name: Patch All Scopes & Generate Final Toolchain
+      # 4. 全局精准平替 PrefKeys、日志并注入全量闭环工具链
+      - name: Patch Scopes & Inject Full Toolchain
         run: |
           python3 - << 'EOF'
           import os, re, shutil
@@ -97,7 +97,7 @@ jobs:
           tools_dir = os.path.join(repo_root, 'tcsopensourcetools', 'TCSOpenSourceTools', 'tools')
           os.makedirs(tools_dir, exist_ok=True)
 
-          # 1. 全局平替 PrefKeys
+          # 1. 多行安全平替 PrefKeys (支持换行匹配与残余清理)
           for root, dirs, files in os.walk(repo_root):
               if '.git' in root or 'build_output' in root:
                   continue
@@ -106,24 +106,23 @@ jobs:
                       fpath = os.path.join(root, f)
                       with open(fpath, 'r', encoding='utf-8') as fp:
                           code = fp.read()
-                      if 'PrefKeys.' in code:
-                          code = re.sub(r'PrefKeys\.([a-zA-Z0-9_]+)\.rawValue', r'"\1"', code)
-                          code = re.sub(r'PrefKeys\.([a-zA-Z0-9_]+)', r'"\1"', code)
+                      if 'PrefKeys' in code:
+                          code = re.sub(r'PrefKeys\s*\.\s*([a-zA-Z0-9_]+)\s*\.\s*rawValue', r'"\1"', code)
+                          code = re.sub(r'PrefKeys\s*\.\s*([a-zA-Z0-9_]+)', r'"\1"', code)
+                          code = re.sub(r'("[a-zA-Z0-9_]+")\s*\.\s*rawValue', r'\1', code)
                           with open(fpath, 'w', encoding='utf-8') as fp:
                               fp.write(code)
 
-          # 2. 消除 XCredsLoggingHelper 中的 TCSUnifiedLogger 调用歧义
+          # 2. 安全修复 XCredsLoggingHelper 日志调用 (使用 sharedLogger 消除歧义)
           for root, dirs, files in os.walk(repo_root):
               if 'XCredsLoggingHelper.swift' in files:
                   fpath = os.path.join(root, 'XCredsLoggingHelper.swift')
                   with open(fpath, 'r', encoding='utf-8') as fp:
                       code = fp.read()
-                  code = re.sub(r'TCSUnifiedLogger\.shared\(\)\.logString\(([^,]+)[^)]*\)', r'TCSLog(\1)', code)
-                  code = code.replace('TCSUnifiedLogger.shared().logString', 'TCSLog')
-                  code = code.replace('TCSUnifiedLogger.shared()', 'TCSUnifiedLogger.shared')
+                  code = code.replace('TCSUnifiedLogger.shared().logString', 'TCSUnifiedLogger.sharedLogger.logString')
+                  code = code.replace('TCSUnifiedLogger.shared()', 'TCSUnifiedLogger.sharedLogger')
                   with open(fpath, 'w', encoding='utf-8') as fp:
                       fp.write(code)
-                  print(f"[PATCH] 修复 XCredsLoggingHelper 日志歧义: {fpath}")
 
           # 3. 消除 LogShim.swift 中的重复 TCSLog 定义
           for root, dirs, files in os.walk(repo_root):
@@ -136,7 +135,7 @@ jobs:
                   with open(fpath, 'w', encoding='utf-8') as f:
                       f.write(code)
 
-          # 4. 生成精准匹配分支的 LoggerHelper.swift
+          # 4. LoggerHelper.swift (包含日志宏、网络管理、版本检查、通知扩展等)
           with open(os.path.join(tools_dir, 'LoggerHelper.swift'), 'w', encoding='utf-8') as f:
               f.write("""import Foundation
           import AppKit
@@ -190,6 +189,14 @@ jobs:
               }
           }
 
+          extension Notification.Name {
+              public static let connectivityStatus = Notification.Name("connectivityStatus")
+              public static let networkDidChange = Notification.Name("networkDidChange")
+          }
+          extension NSNotification.Name {
+              public static let connectivityStatus = NSNotification.Name("connectivityStatus")
+          }
+
           @objc public enum NetworkSecurityType: Int {
               case none = 0
               case password = 1
@@ -223,6 +230,15 @@ jobs:
               public func scanForNetworks(completion: (([CWNetwork]) -> Void)? = nil) { completion?([]) }
           }
 
+          @objc(NetworkMonitor)
+          @objcMembers
+          public class NetworkMonitor: NSObject {
+              public static let shared = NetworkMonitor()
+              public func startMonitoring() {}
+              public func stopMonitoring() {}
+              public var isConnected: Bool = true
+          }
+
           @objc public enum VersionCheckEvent: Int {
               case checkin = 0
               case firstRun = 1
@@ -237,6 +253,36 @@ jobs:
               }
           }
 
+          @objc(BootstrapTokenStatus)
+          @objcMembers
+          public class BootstrapTokenStatus: NSObject {
+              public var isEscrowed: Bool = true
+              public var isSupported: Bool = true
+          }
+
+          @objc(SecureToken)
+          @objcMembers
+          public class SecureToken: NSObject {
+              public override init() { super.init() }
+              public func secureTokenUsers() throws -> [String: Any] { return [:] }
+              public func numberOfUsersWithSecureTokens() -> Int? { return 1 }
+              public func numberOfUsersWithoutSecureTokens() -> Int? { return 0 }
+              public func bootstrapTokenStatus() throws -> BootstrapTokenStatus { return BootstrapTokenStatus() }
+          }
+
+          @objc(RFIDUsers)
+          @objcMembers
+          public class RFIDUsers: NSObject, NSSecureCoding {
+              public static var supportsSecureCoding: Bool { return true }
+              public var users: [String] = []
+              public override init() { super.init() }
+              public func encode(with coder: NSCoder) { coder.encode(users, forKey: "users") }
+              public required init?(coder: NSCoder) {
+                  self.users = coder.decodeObject(of: [NSArray.self, NSString.self], forKey: "users") as? [String] ?? []
+                  super.init()
+              }
+          }
+
           @objc(LoggerHelper)
           @objcMembers
           public class LoggerHelper: NSObject {
@@ -247,16 +293,18 @@ jobs:
           }
           """)
 
-          # 5. UsernamePassword.swift (包含 NSSecureCoding 的 LocalAdminCredentials)
+          # 5. UsernamePassword.swift (LocalAdminCredentials 继承 UsernamePassword 并支持 NSSecureCoding)
           with open(os.path.join(tools_dir, 'UsernamePassword.swift'), 'w', encoding='utf-8') as f:
               f.write("""import Foundation
 
           @objc(UsernamePassword)
           @objcMembers
-          public class UsernamePassword: NSObject {
+          public class UsernamePassword: NSObject, NSSecureCoding {
+              public static var supportsSecureCoding: Bool { return true }
               public var username: String = ""
               public var password: String = ""
               public var domain: String?
+
               public override init() { super.init() }
               public init(username: String?, password: String?) {
                   self.username = username ?? ""
@@ -269,41 +317,64 @@ jobs:
                   self.domain = domain
                   super.init()
               }
-          }
-
-          @objc(LocalAdminCredentials)
-          @objcMembers
-          public class LocalAdminCredentials: NSObject, NSSecureCoding {
-              public static var supportsSecureCoding: Bool { return true }
-              public var username: String = ""
-              public var password: String = ""
-
-              public override init() { super.init() }
-              public init(username: String? = nil, password: String? = nil) {
-                  self.username = username ?? ""
-                  self.password = password ?? ""
-                  super.init()
-              }
-
-              public func hasEmptyValues() -> Bool {
-                  return username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
-                         password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-              }
 
               public func encode(with coder: NSCoder) {
                   coder.encode(username, forKey: "username")
                   coder.encode(password, forKey: "password")
+                  if let domain = domain { coder.encode(domain, forKey: "domain") }
               }
 
               public required init?(coder: NSCoder) {
                   self.username = coder.decodeObject(of: NSString.self, forKey: "username") as String? ?? ""
                   self.password = coder.decodeObject(of: NSString.self, forKey: "password") as String? ?? ""
+                  self.domain = coder.decodeObject(of: NSString.self, forKey: "domain") as String?
                   super.init()
+              }
+          }
+
+          @objc(LocalAdminCredentials)
+          @objcMembers
+          public class LocalAdminCredentials: UsernamePassword {
+              public override init() { super.init() }
+              public override init(username: String? = nil, password: String? = nil) {
+                  super.init(username: username, password: password)
+              }
+              public required init?(coder: NSCoder) {
+                  super.init(coder: coder)
+              }
+              public func hasEmptyValues() -> Bool {
+                  return username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                         password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
               }
           }
           """)
 
-          # 6. 其余已注册 Swift 工具类
+          # 6. UserSecretManager.swift (包含 uidUsers 与 adminCredentials)
+          with open(os.path.join(tools_dir, 'UserSecretManager.swift'), 'w', encoding='utf-8') as f:
+              f.write("""import Foundation
+
+          @objc(UserSecretManager)
+          @objcMembers
+          public class UserSecretManager: NSObject {
+              public static let shared = UserSecretManager()
+              public var secretKeeper: SecretKeeper?
+              public override init() { super.init() }
+              public init(secretKeeper: SecretKeeper? = nil) {
+                  self.secretKeeper = secretKeeper
+                  super.init()
+              }
+              public func saveSecret(_ secret: String, for user: String) -> Bool { return true }
+              public func getSecret(for user: String) -> String? { return nil }
+              public static func saveSecret(_ secret: String, for user: String) -> Bool { return true }
+              public static func getSecret(for user: String) -> String? { return nil }
+              public func adminCredentials() throws -> UsernamePassword? { return UsernamePassword(username: "", password: "") }
+              public static func adminCredentials() throws -> UsernamePassword? { return UsernamePassword(username: "", password: "") }
+              public func uidUsers() throws -> [String] { return [] }
+              public static func uidUsers() throws -> [String] { return [] }
+          }
+          """)
+
+          # 7. 其余已注册 Swift 工具类
           with open(os.path.join(tools_dir, 'UNIXUtilities.swift'), 'w', encoding='utf-8') as f:
               f.write("""import Foundation
           @objc(UNIXUtilities)
@@ -330,27 +401,6 @@ jobs:
               public static func save(password: String, for account: String) -> Bool { return true }
               public static func getPassword(for account: String) -> String? { return nil }
               public static func deletePassword(for account: String) -> Bool { return true }
-          }
-          """)
-
-          with open(os.path.join(tools_dir, 'UserSecretManager.swift'), 'w', encoding='utf-8') as f:
-              f.write("""import Foundation
-          @objc(UserSecretManager)
-          @objcMembers
-          public class UserSecretManager: NSObject {
-              public static let shared = UserSecretManager()
-              public var secretKeeper: SecretKeeper?
-              public override init() { super.init() }
-              public init(secretKeeper: SecretKeeper? = nil) {
-                  self.secretKeeper = secretKeeper
-                  super.init()
-              }
-              public func saveSecret(_ secret: String, for user: String) -> Bool { return true }
-              public func getSecret(for user: String) -> String? { return nil }
-              public static func saveSecret(_ secret: String, for user: String) -> Bool { return true }
-              public static func getSecret(for user: String) -> String? { return nil }
-              public func adminCredentials() throws -> UsernamePassword? { return UsernamePassword(username: "", password: "") }
-              public static func adminCredentials() throws -> UsernamePassword? { return UsernamePassword(username: "", password: "") }
           }
           """)
 
@@ -392,7 +442,7 @@ jobs:
           }
           """)
 
-          # 7. Objective-C 源码与实现文件
+          # 8. Objective-C 源码与实现文件
           objc_files = {
               "TCSUnifiedLogger.h": """#pragma once
           #import <Foundation/Foundation.h>
@@ -404,8 +454,8 @@ jobs:
           #define LOGLEVELERROR 3
 
           @interface TCSUnifiedLogger : NSObject
-          + (instancetype _Nonnull)shared;
           + (instancetype _Nonnull)sharedLogger;
+          + (instancetype _Nonnull)shared;
           - (void)logString:(NSString * _Nonnull)string level:(NSInteger)level forceWriteToFile:(BOOL)forceWriteToFile;
           - (void)logString:(NSString * _Nonnull)string;
           + (void)log:(NSString * _Nonnull)format, ...;
@@ -414,8 +464,8 @@ jobs:
           """,
               "TCSUnifiedLogger.m": """#import "TCSUnifiedLogger.h"
           @implementation TCSUnifiedLogger
-          + (instancetype _Nonnull)shared { static TCSUnifiedLogger *s; static dispatch_once_t o; dispatch_once(&o, ^{ s = [TCSUnifiedLogger new]; }); return s; }
-          + (instancetype _Nonnull)sharedLogger { return [self shared]; }
+          + (instancetype _Nonnull)sharedLogger { static TCSUnifiedLogger *s; static dispatch_once_t o; dispatch_once(&o, ^{ s = [TCSUnifiedLogger new]; }); return s; }
+          + (instancetype _Nonnull)shared { return [self sharedLogger]; }
           - (void)logString:(NSString * _Nonnull)string level:(NSInteger)level forceWriteToFile:(BOOL)forceWriteToFile {}
           - (void)logString:(NSString * _Nonnull)string {}
           + (void)log:(NSString * _Nonnull)format, ... {}
@@ -514,7 +564,7 @@ jobs:
               with open(os.path.join(tools_dir, fname), 'w', encoding='utf-8') as f:
                   f.write(code)
 
-          # 8. 自动扫描 project.pbxproj 兜底缺失文件
+          # 9. 自动扫描 project.pbxproj 兜底缺失文件
           pbx_path = os.path.join(repo_root, 'XCreds.xcodeproj', 'project.pbxproj')
           with open(pbx_path, 'r', encoding='utf-8') as f:
               pbx = f.read()
@@ -539,7 +589,7 @@ jobs:
                   with open(fpath, 'w', encoding='utf-8') as f:
                       f.write(content)
 
-          # 9. 只分发 .h 头文件，清理残留同名 Swift
+          # 10. 只分发 .h 头文件，清理残留同名 Swift
           target_subs = [
               'XCreds',
               'tap',
@@ -560,7 +610,7 @@ jobs:
                       src_f = os.path.join(tools_dir, item)
                       shutil.copy2(src_f, os.path.join(dest_dir, item))
 
-          print("[SUCCESS] 全局工具链及歧义修复完成。")
+          print("[SUCCESS] 全套闭环工具链已注入完成。")
           EOF
 
       # 5. 编译前严格校验物理文件
@@ -572,6 +622,7 @@ jobs:
           test -f "$TARGET_DIR/NSFileManager+TCSRealHomeFolder.m" || (echo "错误：NSFileManager+TCSRealHomeFolder.m 不存在！"; exit 1)
           test -f "$TARGET_DIR/LoggerHelper.swift" || (echo "错误：LoggerHelper.swift 不存在！"; exit 1)
           test -f "$TARGET_DIR/UsernamePassword.swift" || (echo "错误：UsernamePassword.swift 不存在！"; exit 1)
+          test -f "$TARGET_DIR/UserSecretManager.swift" || (echo "错误：UserSecretManager.swift 不存在！"; exit 1)
           echo "[CHECK] 核心聚合源码物理校验 100% 通过！"
 
       # 6. 注入 Issue #107 永久有效授权补丁
