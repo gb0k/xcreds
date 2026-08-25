@@ -87,8 +87,8 @@ jobs:
           ln -sf Versions/A/ProductLicense "$FRAMEWORK_DIR/ProductLicense"
           ln -sf A "$FRAMEWORK_DIR/Versions/Current"
 
-      # 4. 全局平替 PrefKeys 并将全量扩展注入到核心编译源码中
-      - name: Patch PrefKeys Scope & Inject All Combined Toolchain
+      # 4. 全局平替 PrefKeys 并将精准 CoreWLAN / 日志类型注入到核心工具源码中
+      - name: Patch PrefKeys Scope & Inject Precise CoreWLAN & Logger Types
         run: |
           python3 - << 'EOF'
           import os, re, shutil
@@ -124,11 +124,19 @@ jobs:
                   with open(fpath, 'w', encoding='utf-8') as f:
                       f.write(code)
 
-          # 3. 核心 LoggerHelper.swift (聚合日志宏、网络管理、NSImage/Bundle 扩展与 VersionCheck)
+          # 3. 核心 LoggerHelper.swift (精准对齐 CoreWLAN、NetworkSecurityType、VersionCheck 与日志常量)
           with open(os.path.join(tools_dir, 'LoggerHelper.swift'), 'w', encoding='utf-8') as f:
               f.write("""import Foundation
           import AppKit
+          import CoreWLAN
+          import Security
           import os
+
+          public let LOGLEVELDEBUG: Int = 0
+          public let LOGLEVELINFO: Int = 1
+          public let LOGLEVELWARN: Int = 2
+          public let LOGLEVELWARNING: Int = 2
+          public let LOGLEVELERROR: Int = 3
 
           public func TCSLog(_ message: String = "", _ args: CVarArg...) { NSLog(message, args) }
           public func TCSLogWithMark(_ message: String = "", _ args: CVarArg...) { NSLog(message, args) }
@@ -170,6 +178,14 @@ jobs:
               }
           }
 
+          @objc public enum NetworkSecurityType: Int {
+              case none
+              case password
+              case enterpriseUserPassword
+              case enterpriseCertificate
+              case other
+          }
+
           @objc public protocol NetworkManagerDelegate: AnyObject {
               @objc optional func networkDidChange()
           }
@@ -188,24 +204,25 @@ jobs:
               public func wifiState(_ completion: ((WiFiState) -> Void)? = nil) { completion?(.on) }
               public func setWiFiState(_ state: WiFiState, completion: (() -> Void)? = nil) { completion?() }
               public func getCurrentSSID() -> String? { return nil }
-              public func findNetworks() -> [Any]? { return [] }
-              public func findNetworkWithSSID(ssid: String) -> [Any]? { return [] }
-              public func connectWifi(with network: Any? = nil, password: String? = nil, username: String? = nil, identity: Any? = nil) -> Bool { return true }
+              public func findNetworks() -> Set<CWNetwork>? { return Set<CWNetwork>() }
+              public func findNetworkWithSSID(ssid: String) -> [CWNetwork]? { return [] }
+              public func connectWifi(with network: CWNetwork? = nil, password: String? = nil, username: String? = nil, identity: SecIdentity? = nil) -> Bool { return true }
               public func internetConnected() -> Bool { return true }
-              public func networkSecurityType(_ network: Any? = nil) -> String { return "WPA2" }
+              public func networkSecurityType(_ network: CWNetwork? = nil) -> NetworkSecurityType { return .none }
               public func identityCommonNames() -> [String] { return [] }
-              public func scanForNetworks(completion: (([Any]) -> Void)? = nil) { completion?([]) }
+              public func scanForNetworks(completion: (([CWNetwork]) -> Void)? = nil) { completion?([]) }
+          }
+
+          @objc public enum VersionCheckEvent: Int {
+              case checkin = 0
+              case firstRun = 1
           }
 
           @objc(VersionCheck)
           @objcMembers
           public class VersionCheck: NSObject {
               public static let shared = VersionCheck()
-              @objc public enum VersionCheckEvent: Int {
-                  case checkin = 0
-                  case firstRun = 1
-              }
-              public func reportLicenseUsage(identifier: String, appVersion: String, buildNumber: String, event: Any? = nil, completion: ((Bool) -> Void)? = nil) {
+              public func reportLicenseUsage(identifier: String, appVersion: String, buildNumber: String, event: VersionCheckEvent = .checkin, completion: ((Bool) -> Void)? = nil) {
                   completion?(true)
               }
           }
@@ -220,7 +237,7 @@ jobs:
           }
           """)
 
-          # 4. UsernamePassword.swift (包含符合 NSSecureCoding 的 LocalAdminCredentials)
+          # 4. UsernamePassword.swift (包含 NSSecureCoding 的 LocalAdminCredentials)
           with open(os.path.join(tools_dir, 'UsernamePassword.swift'), 'w', encoding='utf-8') as f:
               f.write("""import Foundation
 
@@ -276,7 +293,7 @@ jobs:
           }
           """)
 
-          # 5. 其余注册在 project.pbxproj 的 Swift 工具类
+          # 5. 其余已知 Swift 实体工具类
           with open(os.path.join(tools_dir, 'UNIXUtilities.swift'), 'w', encoding='utf-8') as f:
               f.write("""import Foundation
           @objc(UNIXUtilities)
@@ -365,23 +382,34 @@ jobs:
           }
           """)
 
-          # 6. Objective-C 源码与分类实现文件 (.h & .m)
+          # 6. Objective-C 源码与分类实现文件 (补齐 logString 与常量)
           objc_files = {
               "TCSUnifiedLogger.h": """#pragma once
           #import <Foundation/Foundation.h>
+
+          #define LOGLEVELDEBUG 0
+          #define LOGLEVELINFO 1
+          #define LOGLEVELWARN 2
+          #define LOGLEVELWARNING 2
+          #define LOGLEVELERROR 3
+
           @interface TCSUnifiedLogger : NSObject
-          + (instancetype)shared;
-          + (instancetype)sharedLogger;
-          + (void)log:(NSString *)format, ...;
-          - (void)log:(NSString *)format, ...;
+          + (nonnull instancetype)shared;
+          + (nonnull instancetype)sharedLogger;
+          - (void)logString:(nonnull NSString *)string level:(NSInteger)level forceWriteToFile:(BOOL)forceWriteToFile;
+          - (void)logString:(nonnull NSString *)string;
+          + (void)log:(nonnull NSString *)format, ...;
+          - (void)log:(nonnull NSString *)format, ...;
           @end
           """,
               "TCSUnifiedLogger.m": """#import "TCSUnifiedLogger.h"
           @implementation TCSUnifiedLogger
-          + (instancetype)shared { static TCSUnifiedLogger *s; static dispatch_once_t o; dispatch_once(&o, ^{ s = [TCSUnifiedLogger new]; }); return s; }
-          + (instancetype)sharedLogger { return [self shared]; }
-          + (void)log:(NSString *)format, ... {}
-          - (void)log:(NSString *)format, ... {}
+          + (nonnull instancetype)shared { static TCSUnifiedLogger *s; static dispatch_once_t o; dispatch_once(&o, ^{ s = [TCSUnifiedLogger new]; }); return s; }
+          + (nonnull instancetype)sharedLogger { return [self shared]; }
+          - (void)logString:(nonnull NSString *)string level:(NSInteger)level forceWriteToFile:(BOOL)forceWriteToFile {}
+          - (void)logString:(nonnull NSString *)string {}
+          + (void)log:(nonnull NSString *)format, ... {}
+          - (void)log:(nonnull NSString *)format, ... {}
           @end
           """,
               "NSFileManager+TCSRealHomeFolder.h": """#pragma once
@@ -501,7 +529,7 @@ jobs:
                   with open(fpath, 'w', encoding='utf-8') as f:
                       f.write(content)
 
-          # 8. 只分发 .h 头文件，清理残留的同名 Swift 文件
+          # 8. 只分发 .h 头文件，清理残留同名 Swift
           target_subs = [
               'XCreds',
               'tap',
@@ -522,7 +550,7 @@ jobs:
                       src_f = os.path.join(tools_dir, item)
                       shutil.copy2(src_f, os.path.join(dest_dir, item))
 
-          print("[SUCCESS] 聚合工具链注入完成。")
+          print("[SUCCESS] 精准 CoreWLAN 与日志类型工具链就绪。")
           EOF
 
       # 5. 编译前严格校验物理文件
