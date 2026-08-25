@@ -15,7 +15,7 @@ jobs:
   build-and-package:
     runs-on: macos-14
     steps:
-      # 1. 精准拉取指定 Tag
+      # 1. 精准拉取指定 Tag 源码
       - name: Checkout Specific Upstream Tag
         uses: actions/checkout@v4
         with:
@@ -87,8 +87,8 @@ jobs:
           ln -sf Versions/A/ProductLicense "$FRAMEWORK_DIR/ProductLicense"
           ln -sf A "$FRAMEWORK_DIR/Versions/Current"
 
-      # 4. 全局平替 PrefKeys 并将精准 CoreWLAN / 日志类型注入到核心工具源码中
-      - name: Patch PrefKeys Scope & Inject Precise CoreWLAN & Logger Types
+      # 4. 全局平替 PrefKeys、日志调用歧义并注入精确工具链
+      - name: Patch All Scopes & Generate Final Toolchain
         run: |
           python3 - << 'EOF'
           import os, re, shutil
@@ -97,7 +97,7 @@ jobs:
           tools_dir = os.path.join(repo_root, 'tcsopensourcetools', 'TCSOpenSourceTools', 'tools')
           os.makedirs(tools_dir, exist_ok=True)
 
-          # 1. 全局平替所有 Swift 文件中的 PrefKeys 访问
+          # 1. 全局平替 PrefKeys
           for root, dirs, files in os.walk(repo_root):
               if '.git' in root or 'build_output' in root:
                   continue
@@ -111,9 +111,21 @@ jobs:
                           code = re.sub(r'PrefKeys\.([a-zA-Z0-9_]+)', r'"\1"', code)
                           with open(fpath, 'w', encoding='utf-8') as fp:
                               fp.write(code)
-                          print(f"[PATCH] PrefKeys 作用域修复: {f}")
 
-          # 2. 消除 LogShim.swift 中的重复 TCSLog 定义
+          # 2. 消除 XCredsLoggingHelper 中的 TCSUnifiedLogger 调用歧义
+          for root, dirs, files in os.walk(repo_root):
+              if 'XCredsLoggingHelper.swift' in files:
+                  fpath = os.path.join(root, 'XCredsLoggingHelper.swift')
+                  with open(fpath, 'r', encoding='utf-8') as fp:
+                      code = fp.read()
+                  code = re.sub(r'TCSUnifiedLogger\.shared\(\)\.logString\(([^,]+)[^)]*\)', r'TCSLog(\1)', code)
+                  code = code.replace('TCSUnifiedLogger.shared().logString', 'TCSLog')
+                  code = code.replace('TCSUnifiedLogger.shared()', 'TCSUnifiedLogger.shared')
+                  with open(fpath, 'w', encoding='utf-8') as fp:
+                      fp.write(code)
+                  print(f"[PATCH] 修复 XCredsLoggingHelper 日志歧义: {fpath}")
+
+          # 3. 消除 LogShim.swift 中的重复 TCSLog 定义
           for root, dirs, files in os.walk(repo_root):
               if 'LogShim.swift' in files:
                   fpath = os.path.join(root, 'LogShim.swift')
@@ -124,7 +136,7 @@ jobs:
                   with open(fpath, 'w', encoding='utf-8') as f:
                       f.write(code)
 
-          # 3. 核心 LoggerHelper.swift (精准对齐 CoreWLAN、NetworkSecurityType、VersionCheck 与日志常量)
+          # 4. 生成精准匹配分支的 LoggerHelper.swift
           with open(os.path.join(tools_dir, 'LoggerHelper.swift'), 'w', encoding='utf-8') as f:
               f.write("""import Foundation
           import AppKit
@@ -179,11 +191,9 @@ jobs:
           }
 
           @objc public enum NetworkSecurityType: Int {
-              case none
-              case password
-              case enterpriseUserPassword
-              case enterpriseCertificate
-              case other
+              case none = 0
+              case password = 1
+              case enterpriseUserPassword = 2
           }
 
           @objc public protocol NetworkManagerDelegate: AnyObject {
@@ -237,7 +247,7 @@ jobs:
           }
           """)
 
-          # 4. UsernamePassword.swift (包含 NSSecureCoding 的 LocalAdminCredentials)
+          # 5. UsernamePassword.swift (包含 NSSecureCoding 的 LocalAdminCredentials)
           with open(os.path.join(tools_dir, 'UsernamePassword.swift'), 'w', encoding='utf-8') as f:
               f.write("""import Foundation
 
@@ -293,7 +303,7 @@ jobs:
           }
           """)
 
-          # 5. 其余已知 Swift 实体工具类
+          # 6. 其余已注册 Swift 工具类
           with open(os.path.join(tools_dir, 'UNIXUtilities.swift'), 'w', encoding='utf-8') as f:
               f.write("""import Foundation
           @objc(UNIXUtilities)
@@ -382,7 +392,7 @@ jobs:
           }
           """)
 
-          # 6. Objective-C 源码与分类实现文件 (补齐 logString 与常量)
+          # 7. Objective-C 源码与实现文件
           objc_files = {
               "TCSUnifiedLogger.h": """#pragma once
           #import <Foundation/Foundation.h>
@@ -394,22 +404,22 @@ jobs:
           #define LOGLEVELERROR 3
 
           @interface TCSUnifiedLogger : NSObject
-          + (nonnull instancetype)shared;
-          + (nonnull instancetype)sharedLogger;
-          - (void)logString:(nonnull NSString *)string level:(NSInteger)level forceWriteToFile:(BOOL)forceWriteToFile;
-          - (void)logString:(nonnull NSString *)string;
-          + (void)log:(nonnull NSString *)format, ...;
-          - (void)log:(nonnull NSString *)format, ...;
+          + (instancetype _Nonnull)shared;
+          + (instancetype _Nonnull)sharedLogger;
+          - (void)logString:(NSString * _Nonnull)string level:(NSInteger)level forceWriteToFile:(BOOL)forceWriteToFile;
+          - (void)logString:(NSString * _Nonnull)string;
+          + (void)log:(NSString * _Nonnull)format, ...;
+          - (void)log:(NSString * _Nonnull)format, ...;
           @end
           """,
               "TCSUnifiedLogger.m": """#import "TCSUnifiedLogger.h"
           @implementation TCSUnifiedLogger
-          + (nonnull instancetype)shared { static TCSUnifiedLogger *s; static dispatch_once_t o; dispatch_once(&o, ^{ s = [TCSUnifiedLogger new]; }); return s; }
-          + (nonnull instancetype)sharedLogger { return [self shared]; }
-          - (void)logString:(nonnull NSString *)string level:(NSInteger)level forceWriteToFile:(BOOL)forceWriteToFile {}
-          - (void)logString:(nonnull NSString *)string {}
-          + (void)log:(nonnull NSString *)format, ... {}
-          - (void)log:(nonnull NSString *)format, ... {}
+          + (instancetype _Nonnull)shared { static TCSUnifiedLogger *s; static dispatch_once_t o; dispatch_once(&o, ^{ s = [TCSUnifiedLogger new]; }); return s; }
+          + (instancetype _Nonnull)sharedLogger { return [self shared]; }
+          - (void)logString:(NSString * _Nonnull)string level:(NSInteger)level forceWriteToFile:(BOOL)forceWriteToFile {}
+          - (void)logString:(NSString * _Nonnull)string {}
+          + (void)log:(NSString * _Nonnull)format, ... {}
+          - (void)log:(NSString * _Nonnull)format, ... {}
           @end
           """,
               "NSFileManager+TCSRealHomeFolder.h": """#pragma once
@@ -504,7 +514,7 @@ jobs:
               with open(os.path.join(tools_dir, fname), 'w', encoding='utf-8') as f:
                   f.write(code)
 
-          # 7. 自动扫描 project.pbxproj 兜底缺失文件
+          # 8. 自动扫描 project.pbxproj 兜底缺失文件
           pbx_path = os.path.join(repo_root, 'XCreds.xcodeproj', 'project.pbxproj')
           with open(pbx_path, 'r', encoding='utf-8') as f:
               pbx = f.read()
@@ -529,7 +539,7 @@ jobs:
                   with open(fpath, 'w', encoding='utf-8') as f:
                       f.write(content)
 
-          # 8. 只分发 .h 头文件，清理残留同名 Swift
+          # 9. 只分发 .h 头文件，清理残留同名 Swift
           target_subs = [
               'XCreds',
               'tap',
@@ -550,7 +560,7 @@ jobs:
                       src_f = os.path.join(tools_dir, item)
                       shutil.copy2(src_f, os.path.join(dest_dir, item))
 
-          print("[SUCCESS] 精准 CoreWLAN 与日志类型工具链就绪。")
+          print("[SUCCESS] 全局工具链及歧义修复完成。")
           EOF
 
       # 5. 编译前严格校验物理文件
