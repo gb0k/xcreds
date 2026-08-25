@@ -32,11 +32,11 @@ jobs:
           sudo xcode-select -switch "$LATEST_XCODE/Contents/Developer"
           xcodebuild -version
 
-      # 3. 构造 ProductLicense 虚拟框架并统一合并注入 Swift / ObjC 依赖
-      - name: Build Mock Framework & Inject Unified Stubs
+      # 3. 构造 ProductLicense 虚拟框架并生成全部独立的 Swift/ObjC 源文件
+      - name: Build Mock Framework & Discrete Stubs
         run: |
           cd repo
-          echo "[INFO] 正在构建 ProductLicense.framework 并注入消除歧义的依赖桩代码..."
+          echo "[INFO] 正在就地构建 ProductLicense.framework 与所有独立桩代码..."
 
           # 1. 创建合法的 macOS ProductLicense.framework 二进制与 ModuleMap
           FRAMEWORK_DIR="Carthage/Build/Mac/ProductLicense.framework"
@@ -91,7 +91,7 @@ jobs:
           ln -sf A Versions/Current
           cd ../../../../
 
-          # 2. 统一注入无歧义函数与已知工程编译文件
+          # 2. 补齐所有 Xcode 项目文件中声明的独立 Swift 源码文件
           python3 - << 'EOF'
           import os, re
 
@@ -109,7 +109,7 @@ jobs:
           tools_dir = 'tcsopensourcetools/TCSOpenSourceTools/tools'
           os.makedirs(tools_dir, exist_ok=True)
 
-          # 1. 注入无歧义单签名的 LoggerHelper 与日志函数
+          # 1. LoggerHelper.swift (包含无歧义全局日志函数)
           with open(os.path.join(tools_dir, 'LoggerHelper.swift'), 'w', encoding='utf-8') as f:
               f.write("""import Foundation
           import os
@@ -134,7 +134,7 @@ jobs:
           }
           """)
 
-          # 2. 将 UsernamePassword 与 LocalAdminCredentials 合并注入 UsernamePassword.swift
+          # 2. UsernamePassword.swift (包含 UsernamePassword 与 LocalAdminCredentials)
           with open(os.path.join(tools_dir, 'UsernamePassword.swift'), 'w', encoding='utf-8') as f:
               f.write("""import Foundation
 
@@ -172,7 +172,7 @@ jobs:
           }
           """)
 
-          # 3. 注入 UNIXUtilities 与其他辅助单例
+          # 3. UNIXUtilities.swift
           with open(os.path.join(tools_dir, 'UNIXUtilities.swift'), 'w', encoding='utf-8') as f:
               f.write("""import Foundation
 
@@ -182,6 +182,11 @@ jobs:
               public static func run(command: String, arguments: [String] = []) -> String { return "" }
               public static func runCommand(_ command: String, args: [String] = []) -> String { return "" }
           }
+          """)
+
+          # 4. SecretKeeper.swift (独立实体文件)
+          with open(os.path.join(tools_dir, 'SecretKeeper.swift'), 'w', encoding='utf-8') as f:
+              f.write("""import Foundation
 
           @objc(SecretKeeper)
           @objcMembers
@@ -194,6 +199,11 @@ jobs:
               public static func getPassword(for account: String) -> String? { return nil }
               public static func deletePassword(for account: String) -> Bool { return true }
           }
+          """)
+
+          # 5. UserSecretManager.swift (独立实体文件)
+          with open(os.path.join(tools_dir, 'UserSecretManager.swift'), 'w', encoding='utf-8') as f:
+              f.write("""import Foundation
 
           @objc(UserSecretManager)
           @objcMembers
@@ -204,6 +214,11 @@ jobs:
               public static func saveSecret(_ secret: String, for user: String) -> Bool { return true }
               public static func getSecret(for user: String) -> String? { return nil }
           }
+          """)
+
+          # 6. FDESetupHelper.swift (独立实体文件)
+          with open(os.path.join(tools_dir, 'FDESetupHelper.swift'), 'w', encoding='utf-8') as f:
+              f.write("""import Foundation
 
           @objc(FDESetupHelper)
           @objcMembers
@@ -218,7 +233,7 @@ jobs:
           }
           """)
 
-          # 4. 注入 DataExtension
+          # 7. DataExtension.swift (独立实体文件)
           with open(os.path.join(tools_dir, 'DataExtension.swift'), 'w', encoding='utf-8') as f:
               f.write("""import Foundation
           extension Data {
@@ -227,7 +242,7 @@ jobs:
           }
           """)
 
-          # 5. 补齐 Objective-C 头文件
+          # 8. 补齐 Objective-C 头文件
           headers_content = {
               "TCSKeychain.h": """#pragma once
           #import <Foundation/Foundation.h>
@@ -289,7 +304,7 @@ jobs:
                   with open(os.path.join(d, h_name), 'w', encoding='utf-8') as f:
                       f.write(code)
 
-          print("[SUCCESS] 统一依赖与无歧义符号注入完成。")
+          print("[SUCCESS] 所有独立 Swift 与 ObjC 依赖实体文件创建完成。")
           EOF
 
       # 4. 注入 Issue #107 永久有效授权补丁
