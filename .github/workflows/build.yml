@@ -32,11 +32,11 @@ jobs:
           sudo xcode-select -switch "$LATEST_XCODE/Contents/Developer"
           xcodebuild -version
 
-      # 3. 构造 ProductLicense.framework、统一全局 TCSLog 与补齐依赖
-      - name: Build Mock Framework & Unify TCSLog
+      # 3. 构造 ProductLicense.framework 二进制与原生目录 Mock 依赖
+      - name: Build Mock Framework & Stubs In-Place
         run: |
           cd repo
-          echo "[INFO] 正在构建 ProductLicense.framework 并统一全局日志符号..."
+          echo "[INFO] 正在就地构建 ProductLicense.framework 与依赖桩代码..."
 
           # 1. 创建合法的 macOS ProductLicense.framework 二进制与 ModuleMap
           FRAMEWORK_DIR="Carthage/Build/Mac/ProductLicense.framework"
@@ -91,11 +91,11 @@ jobs:
           ln -sf A Versions/Current
           cd ../../../../
 
-          # 2. 统一 TCSLog 定义并修正 OSLog 类型声明
+          # 2. 统一 TCSLog 定义并就地补齐所有 Swift/ObjC 依赖
           python3 - << 'EOF'
           import os, re
 
-          # 消除 LogShim.swift 中的重复 TCSLog 定义，统一由 LoggerHelper 提供
+          # 消除 LogShim.swift 中的重复 TCSLog 定义
           for root, dirs, files in os.walk('.'):
               if 'LogShim.swift' in files:
                   fpath = os.path.join(root, 'LogShim.swift')
@@ -291,8 +291,9 @@ jobs:
                       print(f"[SUCCESS] 补丁注入成功: {path}")
           EOF
 
-      # 5. 执行 Release 编译并捕获完整日志
+      # 5. 执行 Release 编译（移除破坏性的 CLI HEADER/FRAMEWORK 参数）
       - name: Build XCreds Release
+        id: xcodebuild_step
         run: |
           cd repo
           echo "[INFO] 正在执行 Release 编译..."
@@ -304,8 +305,6 @@ jobs:
                      CODE_SIGN_IDENTITY="-" \
                      CODE_SIGNING_REQUIRED=NO \
                      CODE_SIGNING_ALLOWED=YES \
-                     FRAMEWORK_SEARCH_PATHS='$(inherited)$(SRCROOT)/Carthage/Build/Mac' \
-                     HEADER_SEARCH_PATHS='$(inherited) $(SRCROOT)/XCreds$(SRCROOT)/tcsopensourcetools/TCSOpenSourceTools/tools' \
                      clean build 2>&1 | tee ../xcodebuild.log
 
       # 6. 生成安装包
@@ -325,7 +324,7 @@ jobs:
                    --install-location / \
                    ../XCreds-5.9.1-Unlimited.pkg
 
-      # 7. 成功时上传 PKG
+      # 7. 成功时上传安装包
       - name: Upload Artifact PKG
         uses: actions/upload-artifact@v4
         with:
@@ -333,56 +332,40 @@ jobs:
           path: XCreds-5.9.1-Unlimited.pkg
           retention-days: 7
 
-      # 8. 编译失败时自动提取、高亮并汇总所有具体错误
-      - name: Auto Extract & Highlight Errors
+      # 8. 编译失败时自动汇总核心错误详情
+      - name: Extract & Display Compile Errors
         if: failure()
         run: |
-          echo "==================== [ 自动汇总的错误详情 ] ===================="
+          echo "==================== [ 核心编译错误详情汇总 ] ===================="
           python3 - << 'EOF'
           import os, re
 
-          log_path = 'xcodebuild.log'
-          if not os.path.exists(log_path):
-              print("未找到日志文件 xcodebuild.log")
+          log_file = 'xcodebuild.log'
+          if not os.path.exists(log_file):
+              print("未找到日志文件")
               exit(0)
 
-          with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
+          with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
               lines = f.readlines()
 
-          error_blocks = []
-          for i, line in enumerate(lines):
-              if re.search(r'(error:|fatal error:|BUILD FAILED|Command \w+ failed with a nonzero exit code)', line, re.IGNORECASE):
-                  start = max(0, i - 4)
-                  end = min(len(lines), i + 5)
+          error_lines = []
+          for idx, line in enumerate(lines):
+              if ': error:' in line or ': fatal error:' in line or 'error: ' in line:
+                  # 抓取错误发生行及其前后 2 行上下文
+                  start = max(0, idx - 1)
+                  end = min(len(lines), idx + 3)
                   block = "".join(lines[start:end]).strip()
-                  if block not in error_blocks:
-                      error_blocks.append(block)
+                  if block not in error_lines:
+                      error_lines.append(block)
 
-          summary_text = ""
-          if error_blocks:
-              print(f"检测到 {len(error_blocks)} 处核心错误详情:\n")
-              for idx, err in enumerate(error_blocks[:10], 1):
-                  formatted = f"--- [错误 #{idx}] ---\n{err}\n"
-                  print(formatted)
-                  summary_text += f"```text\n{formatted}\n```\n\n"
+          if error_lines:
+              print(f"共捕获到 {len(error_lines)} 处具体错误:\n")
+              for i, err in enumerate(error_lines[:15], 1):
+                  print(f"--- 错误 #{i} ---")
+                  print(err)
+                  print("-" * 40)
           else:
-              tail_lines = "".join(lines[-30:])
-              print("未正则匹配到标准错误关键词，打印日志末尾 30 行:\n" + tail_lines)
-              summary_text = f"```text\n{tail_lines}\n```"
-
-          # 写入 GitHub Actions 页面摘要
-          summary_file = os.environ.get('GITHUB_STEP_SUMMARY')
-          if summary_file:
-              with open(summary_file, 'a', encoding='utf-8') as sf:
-                  sf.write("### 🚨 Xcode 编译报错汇总\n\n" + summary_text)
+              print("未正则匹配到标准格式报错，打印日志末尾 40 行:")
+              print("".join(lines[-40:]))
           EOF
-          echo "================================================================"
-
-      # 9. 编译失败时上传完整日志
-      - name: Upload Raw Build Log On Failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: Xcode-Raw-Build-Log
-          path: xcodebuild.log
-          retention-days: 3
+          echo "=================================================================="
