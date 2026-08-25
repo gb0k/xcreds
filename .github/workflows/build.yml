@@ -12,7 +12,7 @@ jobs:
   build-and-package:
     runs-on: macos-14
     steps:
-      # 1. 使用 actions/checkout 精准拉取上游仓库的附注 Tag
+      # 1. 干净拉取官方指定 Tag 源码 (保持原始工程文件完整)
       - name: Checkout Specific Upstream Tag
         uses: actions/checkout@v4
         with:
@@ -20,14 +20,7 @@ jobs:
           ref: ${{ github.event.inputs.target_tag }}
           path: repo
 
-      # 2. 安装构建依赖 (gsed & WhiteBox Packages)
-      - name: Install Build Tools
-        run: |
-          echo "[INFO] 正在安装 Packages 打包工具与 GNU sed..."
-          brew install gsed
-          brew install --cask packages
-
-      # 3. 切换 Xcode 16+ 编译器
+      # 2. 切换至 Xcode 16+ 编译器
       - name: Select Xcode 16+
         run: |
           LATEST_XCODE=$(find /Applications -maxdepth 1 -name "Xcode_16*.app" | sort -V | tail -n 1)
@@ -36,36 +29,18 @@ jobs:
           sudo xcode-select -switch "$LATEST_XCODE/Contents/Developer"
           xcodebuild -version
 
-      # 4. 全局替换 Bundle ID 与清理官方 Team ID (UXP6YEHSPW)
-      - name: Replace Bundle ID & Team ID
+      # 3. 补齐依赖 Swift 桩代码并安全处理桥接头文件 (绝不破坏 .pbxproj)
+      - name: Clean Bridging Headers & Generate Stubs
         run: |
           cd repo
-          echo "[INFO] 正在全局替换 Bundle ID 与 Team ID..."
-          export BUNDLE_ID_PREFIX='com.opensource'
-
-          # 替换所有文本文件中的官方标识符
-          grep -RlI 'com\.twocanoes' . | grep -v '.git' | sed -e 's_\(.*\)_"\1"_g' | xargs gsed -i "s/com\.twocanoes/$BUNDLE_ID_PREFIX/g"
-          grep -RlI 'UXP6YEHSPW' . | grep -v '.git' | sed -e 's_\(.*\)_"\1"_g' | xargs gsed -i "s/UXP6YEHSPW//g"
-
-          # 物理重命名带 Bundle ID 的文件名
-          find . -iname '*com.twocanoes*' -not -path '*/.*' -exec bash -c 'old="{}"; new=$(echo "$old" | sed "s/com\.twocanoes/com.opensource/"); mv "$old" "$new"' \;
-
-      # 5. 补齐依赖 Swift 桩代码并清理桥接头文件中的旧引用
-      - name: Clean Bridging Headers & Stubs
-        run: |
-          cd repo
-          echo "[INFO] 正在补全工具类依赖..."
+          echo "[INFO] 正在安全补全工具类依赖..."
           python3 - << 'EOF'
           import os, re
 
           tools_dir = 'tcsopensourcetools/TCSOpenSourceTools/tools'
           os.makedirs(tools_dir, exist_ok=True)
 
-          # 1. 补齐 project.pbxproj 中引用的缺失 Swift 工具类
-          with open('XCreds.xcodeproj/project.pbxproj', 'r', encoding='utf-8') as f:
-              pbx = f.read()
-
-          referenced_swifts = set(re.findall(r'/\*\s*([a-zA-Z0-9_\-]+\.swift)\s+in\s+Sources', pbx))
+          # 1. 自动补齐缺失的 Swift 工具类桩代码
           stubs = {
               "LoggerHelper.swift": "import Foundation\n@objc public class LoggerHelper: NSObject { @objc public static let shared = LoggerHelper(); @objc public static func log(_ msg: String) {} }",
               "UNIXUtilities.swift": "import Foundation\n@objc public class UNIXUtilities: NSObject { @objc public static func run(command: String, arguments: [String] = []) -> String { return \"\" } }",
@@ -76,14 +51,13 @@ jobs:
               "FDESetupHelper.swift": "import Foundation\n@objc public class FDESetupHelper: NSObject { @objc public static let shared = FDESetupHelper(); @objc public static func isFDEEnabled() -> Bool { return false }; @objc public static func isEnabled() -> Bool { return false }; @objc public static func addAuthUser(username: String, password: String) -> Bool { return true }; @objc public static func checkFileVaultStatus() -> [String: Any] { return [:] } }"
           }
 
-          for s_file in referenced_swifts:
-              fpath = os.path.join(tools_dir, s_file)
+          for s_name, code in stubs.items():
+              fpath = os.path.join(tools_dir, s_name)
               if not os.path.exists(fpath):
-                  content = stubs.get(s_file, "import Foundation\n")
                   with open(fpath, 'w', encoding='utf-8') as f:
-                      f.write(content)
+                      f.write(code)
 
-          # 2. 自动注释掉桥接头文件中不存在的头文件引用
+          # 2. 仅安全注释 Bridging Header 中不存在的头文件引用 (不动 project.pbxproj)
           for root, dirs, files in os.walk('.'):
               if '.git' in root or 'build' in root: continue
               for f in files:
@@ -115,11 +89,11 @@ jobs:
                           fp.writelines(new_lines)
           EOF
 
-      # 6. 注入 Issue #107 补丁 (解除时间与授权限制)
-      - name: Apply Unlimited License Patch
+      # 4. 注入 Issue #107 补丁 (解除 14 天及许可限制)
+      - name: Apply Issue #107 Unlimited License Patch
         run: |
           cd repo
-          echo "[INFO] 正在注入永久有效授权补丁..."
+          echo "[INFO] 正在注入永久有效授权补丁 (LicenseChecker -> .valid)..."
           python3 - << 'EOF'
           import os, re
           for root, dirs, files in os.walk('.'):
@@ -135,7 +109,7 @@ jobs:
                       print(f"[SUCCESS] 补丁注入成功: {path}")
           EOF
 
-      # 7. 免证书构建 Release
+      # 5. 免证书 Release 编译 (通过 CLI 覆盖代码签名，彻底绕开证书与 Team ID 限制)
       - name: Build XCreds Release
         run: |
           cd repo
@@ -149,7 +123,7 @@ jobs:
                      CODE_SIGNING_ALLOWED=YES \
                      clean build
 
-      # 8. 打包为 PKG 安装包
+      # 6. 读取真实版本并打包为 PKG
       - name: Package Distribution PKG
         run: |
           cd repo
@@ -161,12 +135,12 @@ jobs:
           cp -R "$APP_PATH" pkg_root/Applications/
 
           pkgbuild --root pkg_root \
-                   --identifier com.opensource.xcreds \
+                   --identifier com.twocanoes.xcreds \
                    --version "${APP_VERSION}" \
                    --install-location / \
                    ../XCreds-5.9.1-Unlimited.pkg
 
-      # 9. 上传生成的 PKG 到 Artifacts
+      # 7. 上传生成的 PKG 到 Artifacts
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
